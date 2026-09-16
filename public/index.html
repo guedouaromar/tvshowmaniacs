@@ -945,7 +945,7 @@ function bindCommon() {
       const patch = { username: $('#username').value.trim().toLowerCase(), display_name: $('#displayName').value.trim(), is_public: $('#isPublic').checked };
       if (!/^[a-z0-9_]{3,24}$/.test(patch.username)) return toast('Username: 3–24 lowercase letters, digits or _');
       save();
-      if (!profile) { profile = await createProfile(user); if (!profile) return; }
+      if (!profile) { profile = await createProfile(user); if (!profile) return toast('No profile yet — sign out and back in, then try again.'); }
       const { data, error } = await sb.from('profiles').update(patch).eq('id', user.id).select().maybeSingle();
       if (error || !data) return toast(error && /unique|duplicate/i.test(error.message) ? 'That username is taken' : 'Could not save profile: ' + (error ? error.message : 'no profile row — run schema.sql in Supabase'));
       profile = data; toast('Saved'); render(); };
@@ -1102,7 +1102,16 @@ function bindLogin() {
   $('#emailGo').onclick = async () => { const email = $('#emailLogin').value.trim(); if (!email) return; const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + '/' } }); $('#loginMsg').textContent = error ? error.message : 'Check your inbox for the sign-in link.'; };
   $('#emailLogin').onkeydown = e => { if (e.key === 'Enter') $('#emailGo').click(); };
 }
+async function forceSignOut(msg) {
+  try { await sb.auth.signOut(); } catch (e) {}
+  try { Object.keys(localStorage).filter(k => k.startsWith('tvsm.cache.')).forEach(k => localStorage.removeItem(k)); } catch (e) {}
+  user = null; profile = null; state = blank(); navigated = true; render(); if (msg) toast(msg);
+}
 async function onSignedIn(u) {
+  // Make sure the account still exists on the server (a cached session survives the user being deleted in Supabase)
+  const { data: chk, error: chkErr } = await sb.auth.getUser();
+  if (chkErr || !chk || !chk.user) return forceSignOut('Your session is no longer valid — please sign in again.');
+  u = chk.user;
   user = u; KEY = 'tvsm.cache.' + u.id;
   state = loadLocal(KEY) || blank();
   let { data: p } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
@@ -1124,6 +1133,7 @@ async function createProfile(u) {
     const username = i ? base + '_' + Math.random().toString(36).slice(2, 6) : base;
     const { data, error } = await sb.from('profiles').insert({ id: u.id, username, display_name: (u.user_metadata && (u.user_metadata.full_name || u.user_metadata.name)) || base, avatar_url: u.user_metadata && u.user_metadata.avatar_url || null }).select().single();
     if (data) return data;
+    if (/foreign key|not present in table/i.test(error.message)) { forceSignOut('This account no longer exists — please sign in again.'); return null; }
     if (!/duplicate|unique/i.test(error.message)) { toast('Could not create your profile: ' + error.message + ' — did you run schema.sql?'); return null; }
   }
   return null;
