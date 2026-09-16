@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TVShowManiacs</title>
+<meta name="description" content="Track the series and movies you watch, know when new episodes drop, and see what your friends are watching.">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/favicon-32.png" sizes="32x32">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<script src="/config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --panel-2: #1f232c; --line: #2a2f3a;
+    --text: #e8eaf0; --muted: #8b93a7; --accent: #f5c518; --accent-ink: #1a1400;
+    --ok: #3ddc84; --warn: #ff7a59; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  body { padding-inline: 16px; padding-block: 0 48px; max-width: 1080px; margin-inline: auto; }
+  a { color: var(--accent); }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); border-radius: 8px; padding: 7px 12px; }
+  button:hover { border-color: #3a4150; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button.ghost { background: transparent; }
+  button.small { padding: 4px 9px; font-size: 13px; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], input[type=password], select { font: inherit; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; width: 100%; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+
+  header { display: flex; align-items: center; gap: 14px; padding: 18px 0 12px; flex-wrap: wrap; }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: .3px; }
+  header h1 span { color: var(--accent); }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button { background: transparent; border-color: transparent; color: var(--muted); }
+  nav button.active { color: var(--text); background: var(--panel); border-color: var(--line); }
+
+  .search { display: flex; gap: 8px; margin: 8px 0 16px; }
+  .search input { flex: 1; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; margin-bottom: 14px; }
+  .panel h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 22px 0; text-align: center; }
+  .row { display: flex; gap: 12px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row .grow { flex: 1; min-width: 0; }
+  .row .title { font-weight: 600; }
+  .row .sub { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .poster { width: 42px; height: 63px; border-radius: 6px; object-fit: cover; background: var(--panel-2); flex: none; }
+  .poster.lg { width: 92px; height: 138px; border-radius: 10px; }
+  .date-head { font-weight: 600; margin: 14px 0 4px; display: flex; gap: 8px; align-items: baseline; }
+  .date-head small { color: var(--muted); font-weight: 400; }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
+  .badge.today { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .badge.new { background: rgba(61,220,132,.15); color: var(--ok); border-color: rgba(61,220,132,.3); }
+  .badge.ended { color: var(--warn); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; cursor: pointer; transition: transform .1s; }
+  .card:hover { transform: translateY(-2px); border-color: #3a4150; }
+  .card img { width: 100%; aspect-ratio: 2/3; object-fit: cover; display: block; background: var(--panel-2); }
+  .card .body { padding: 8px 10px 10px; }
+  .card .name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar { height: 4px; background: var(--panel-2); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
+  .bar.done-ended i { background: #a78bfa; } .bar.done-running i { background: var(--ok); }
+
+  .detail-head { display: flex; gap: 16px; align-items: flex-start; }
+  .detail-head h2 { margin: 0 0 4px; font-size: 22px; text-transform: none; letter-spacing: 0; color: var(--text); }
+  .detail-head .meta { color: var(--muted); font-size: 14px; }
+  .detail-head .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .season { margin-top: 14px; }
+  .season-head { display: flex; align-items: center; gap: 10px; padding: 8px 0; cursor: pointer; user-select: none; }
+  .season-head h3 { margin: 0; font-size: 15px; flex: 1; }
+  .ep { display: grid; grid-template-columns: 26px 44px 1fr auto; gap: 10px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); }
+  .ep.future { opacity: .55; }
+  .ep .num { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+  .ep .n { min-width: 0; }
+  .ep .n .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ep .n .o { color: var(--muted); font-size: 12px; display: none; }
+  .ep .d { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .chk { width: 22px; height: 22px; border-radius: 6px; border: 1.5px solid var(--line); background: var(--panel-2); display: grid; place-items: center; cursor: pointer; color: transparent; font-size: 14px; }
+  .chk.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .ep.future .chk { pointer-events: none; opacity: .4; }
+
+  .toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,.5); opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
+  .toast.show { opacity: 1; }
+  .kv { display: grid; grid-template-columns: 140px 1fr; gap: 10px; align-items: center; margin: 10px 0; }
+  .kv label { color: var(--muted); }
+  .help { font-size: 13px; color: var(--muted); }
+  .help ol { padding-left: 18px; margin: 6px 0; }
+  .split { display: flex; gap: 8px; flex-wrap: wrap; }
+  .setup { text-align: center; padding: 40px 16px; }
+  .setup h2 { margin-top: 0; }
+  .setup input { max-width: 480px; margin: 12px auto; display: block; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex: none; }
+  .seg button { border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 7px 12px; }
+  .seg button.active { background: var(--panel); color: var(--text); }
+  .rating { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; font-size: 13px; }
+  .rating .star { color: var(--accent); }
+  .rating .imdb { background: var(--accent); color: var(--accent-ink); font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: 3px; letter-spacing: .04em; }
+  .strip { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+  .person { flex: none; width: 84px; text-align: center; cursor: pointer; }
+  .person img, .person .ph { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; background: var(--panel-2); margin: 0 auto 4px; display: block; }
+  .person .pn { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .person .pc { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .why { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card.rec .rt { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.7); border-radius: 6px; padding: 2px 6px; font-size: 12px; font-weight: 600; }
+  .card.rec { position: relative; }
+  .card.rec .tag { position: absolute; top: 6px; left: 6px; background: var(--ok); color: #05210f; border-radius: 6px; padding: 2px 6px; font-size: 11px; font-weight: 700; }
+  .grid.six { grid-template-columns: repeat(6, 1fr); }
+  .ep .n .t.lnk { cursor: pointer; } .ep .n .t.lnk:hover { color: var(--accent); }
+  .still { width: 100%; max-width: 560px; aspect-ratio: 16/9; object-fit: cover; border-radius: 10px; background: var(--panel-2); display: block; }
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 12px 0; }
+  .fact { background: var(--panel-2); border-radius: 10px; padding: 10px 12px; }
+  .fact .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .fact .v { font-size: 15px; font-weight: 600; margin-top: 2px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat { background: var(--panel-2); border-radius: 12px; padding: 14px; }
+  .stat .big { font-size: 26px; font-weight: 700; line-height: 1.1; }
+  .stat .lbl { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .hbar { display: grid; grid-template-columns: 120px 1fr 60px; gap: 10px; align-items: center; padding: 4px 0; font-size: 13px; }
+  .hbar .trk { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; } .hbar .trk i { display: block; height: 100%; background: var(--accent); }
+  .hbar .val { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .cols { display: flex; align-items: flex-end; gap: 6px; height: 90px; }
+  .cols .c { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; gap: 3px; font-size: 10px; color: var(--muted); }
+  .cols .c i { display: block; width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; flex-wrap: wrap; }
+  .tabs button { background: transparent; border-color: transparent; color: var(--muted); }
+  .tabs button.active { color: var(--text); background: var(--panel); border-color: var(--line); }
+  .card .tag.want { background: #6ea8ff; color: #041530; } .card .tag.seen { background: var(--accent); color: var(--accent-ink); }
+  @media (max-width: 800px) { .grid.six { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 600px) {
+    .hbar { grid-template-columns: 90px 1fr 50px; }
+    .kv { grid-template-columns: 1fr; gap: 4px; }
+    .ep { grid-template-columns: 26px 36px 1fr; }
+    .ep .d { grid-column: 3; justify-self: start; }
+    .poster.lg { width: 72px; height: 108px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>TVShow<span>Maniacs</span></h1>
+  <nav>
+    <button data-view="home">Up next</button>
+    <button data-view="friends">Friends</button>
+    <button data-view="calendar">Calendar</button>
+    <button data-view="shows">My shows</button>
+    <button data-view="movies">Movies</button>
+    <button data-view="space">My space</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+</header>
+<main id="app"></main>
+<footer class="help" style="text-align:center;margin-top:30px;padding:16px 0;border-top:1px solid var(--line)">
+  <span id="syncState"></span> Data from <a href="https://www.themoviedb.org" target="_blank" rel="noopener">TMDB</a> (not endorsed or certified by TMDB) · where-to-watch by <a href="https://www.justwatch.com" target="_blank" rel="noopener">JustWatch</a> · schedules by <a href="https://www.tvmaze.com" target="_blank" rel="noopener">TVmaze</a> · <a href="/privacy.html">Privacy &amp; credits</a>
+</footer>
+<div class="toast" id="toast"></div>
+
+<script>
+/* ============ storage ============ */
+const CFG = Object.assign({ SUPABASE_URL: '', SUPABASE_ANON: '', API: '' }, window.TVSM_CONFIG || {});
+for (const k of ['SUPABASE_URL', 'API']) if (!/^https?:\/\//.test(CFG[k] || '')) CFG[k] = ''; else CFG[k] = CFG[k].replace(/\/+$/, '');
+const LEGACY_KEY = 'tvshowmaniacs.v1';
+const IMG = 'https://image.tmdb.org/t/p/';
+let KEY = LEGACY_KEY;                 // becomes tvsm.cache.<user id> after sign-in
+let user = null, profile = null;     // Supabase auth user + our profiles row
+let state = blank();
+function blank() { return { apiKey: '', omdbKey: '', lang: 'en-US', region: 'FR', shows: {}, watched: {}, order: [], trend: null, movies: {}, pools: null, dismissed: [], dismissedM: [] }; }
+function normalize(s) { const b = blank(); for (const k in b) if (s[k] === undefined) s[k] = b[k]; return s; }
+function loadLocal(key) { try { const s = JSON.parse(localStorage.getItem(key)); if (s && s.shows) return normalize(s); } catch (e) {} return null; }
+function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} if (user) scheduleSync(); }
+
+/* ============ helpers ============ */
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const todayStr = () => { const d = new Date(); return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-'); };
+const TODAY = todayStr();
+const epKey = (s, e) => `${s}-${e}`;
+const code = (s, e) => `S${String(s).padStart(2,'0')}E${String(e).padStart(2,'0')}`;
+function fmtDate(iso, opts) {
+  if (!iso) return 'TBA';
+  const d = new Date(iso + 'T12:00:00');
+  return d.toLocaleDateString(undefined, opts || { weekday: 'short', day: 'numeric', month: 'short' });
+}
+function relDay(iso) {
+  if (!iso) return 'TBA';
+  const a = new Date(iso + 'T12:00:00'), b = new Date(TODAY + 'T12:00:00');
+  const diff = Math.round((a - b) / 86400000);
+  if (diff === 0) return 'Today'; if (diff === 1) return 'Tomorrow'; if (diff === -1) return 'Yesterday';
+  if (diff > 1 && diff < 7) return `In ${diff} days`; if (diff < 0 && diff > -7) return `${-diff} days ago`;
+  return fmtDate(iso);
+}
+function localDate(stamp) { const d = new Date(stamp); if (isNaN(d)) return null; return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-'); }
+function localTime(stamp) { const d = new Date(stamp); if (isNaN(d)) return ''; return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }); }
+function whenHTML(ep) { return ep.at ? `<span class="muted" style="font-weight:400"> · ${localTime(ep.at)}</span>` : ''; }
+function airsLine(s) {
+  const m = s.maze; if (!m) return '';
+  const parts = [];
+  if (m.web) parts.push(`Releases on ${esc(m.channel || 'streaming')}`); else if (m.channel) parts.push(`Airs on ${esc(m.channel)}`);
+  if (m.days && m.days.length) parts.push(m.days.join(', ') + (m.time ? ` at ${m.time}` : ''));
+  if (m.time && m.tz) parts.push(`(${esc(m.tz)} time)`);
+  const nxt = upcoming(s)[0];
+  const local = nxt && nxt.at ? ` · next one available ${fmtDate(nxt.air)} at ${localTime(nxt.at)} your time` : '';
+  return parts.length || local ? `<div class="meta" style="margin-top:4px">🕘 ${parts.join(' ')}${local}</div>` : '';
+}
+function providersHTML(s) {
+  const p = s.providers; if (!p) return '';
+  const chip = x => `<span class="badge" style="display:inline-flex;align-items:center;gap:5px;color:var(--text)">${x.logo ? `<img src="${IMG}w45${x.logo}" alt="" style="width:16px;height:16px;border-radius:3px">` : ''}${esc(x.name)}</span>`;
+  if (!p.stream.length && !p.rent.length) return `<div class="meta" style="margin-top:6px">📺 No streaming platform listed for ${regionName(p.region)}${s.network ? ` · broadcast on ${esc(s.network)}` : ''}</div>`;
+  return `<div class="meta" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px;align-items:center">📺 ${p.stream.length ? `Stream on ${p.stream.map(chip).join(' ')}` : ''}${p.rent.length ? `<span class="help">${p.stream.length ? ' · ' : ''}Rent/buy: ${p.rent.slice(0, 3).map(x => esc(x.name)).join(', ')}</span>` : ''}
+    <span class="help">(${regionName(p.region)})</span></div>`;
+}
+let toastT; function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2600); }
+function isWatched(showId, s, e) { return !!(state.watched[showId] && state.watched[showId][epKey(s, e)]); }
+function aired(ep) { return !!ep.air && ep.air <= TODAY; }
+function airedEps(show) { return show.eps.filter(aired); }
+function progress(show) { const a = airedEps(show); const w = a.filter(ep => isWatched(show.id, ep.s, ep.e)).length; return { watched: w, total: a.length }; }
+// Progress bar: purple = up to date & show ended · green = up to date & still running · yellow = behind · empty = not started
+function barHTML(s, p, style) {
+  const pct = p.total ? Math.round(100 * p.watched / p.total) : 0; const upToDate = p.total > 0 && p.watched === p.total;
+  const ended = /Ended|Canceled/.test(s.status || ''); const cls = upToDate ? (ended ? 'done-ended' : 'done-running') : '';
+  const title = !p.watched ? 'Not started' : upToDate ? (ended ? 'Up to date · show ended' : 'Up to date · show still running') : `${p.watched}/${p.total} episodes`;
+  return `<div class="bar ${cls}" title="${title}"${style ? ` style="${style}"` : ''}><i style="width:${pct}%"></i></div>`;
+}
+function nextToWatch(show) { return show.eps.find(ep => aired(ep) && !isWatched(show.id, ep.s, ep.e)) || null; }
+function upcoming(show) { return show.eps.filter(ep => ep.air && ep.air > TODAY); }
+
+/* ============ TMDB ============ */
+async function tmdb(path, params = {}) {
+  // Normal mode: go through our Cloudflare Worker (it holds the TMDB key). Fallback: a personal key typed in Settings.
+  const key = (state.apiKey || '').trim();
+  const viaProxy = !!CFG.API && !key;
+  if (!viaProxy && !key) throw new Error('The TMDB proxy is not set up yet — see README step 4 (or add a personal key in Settings)');
+  const url = new URL(viaProxy ? CFG.API + '/tmdb' + path : 'https://api.themoviedb.org/3' + path);
+  url.searchParams.set('language', state.lang || 'en-US');
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  const headers = { accept: 'application/json' };
+  if (!viaProxy) { if (key.startsWith('eyJ')) headers.Authorization = 'Bearer ' + key; else url.searchParams.set('api_key', key); }
+  const r = await fetch(url, { headers });
+  if (!r.ok) {
+    let msg = r.status + ' ' + r.statusText;
+    try { const j = await r.json(); if (j.status_message) msg = j.status_message; } catch (e) {}
+    throw new Error(msg);
+  }
+  return r.json();
+}
+const slim = r => ({ id: r.id, name: r.name, poster: r.poster_path || null, year: (r.first_air_date || '').slice(0, 4), vote: r.vote_average || 0, votes: r.vote_count || 0, pop: r.popularity || 0, over: (r.overview || '').slice(0, 160), genreIds: r.genre_ids || [] });
+async function fetchImdbRating(imdbId) {
+  const k = (state.omdbKey || '').trim(); if (!imdbId || (!k && !CFG.API)) return null;
+  try { const r = await fetch(k ? `https://www.omdbapi.com/?i=${imdbId}&apikey=${encodeURIComponent(k)}` : `${CFG.API}/omdb?i=${imdbId}`); if (!r.ok) return null; const j = await r.json();
+    if (j && j.imdbRating && j.imdbRating !== 'N/A') return { rating: +j.imdbRating, votes: j.imdbVotes || '' }; } catch (e) {}
+  return null;
+}
+async function fetchProviders(id) {
+  try { const d = await tmdb(`/tv/${id}/watch/providers`); const r = (d.results || {})[state.region] || {};
+    const pick = k => (r[k] || []).map(p => ({ name: p.provider_name, logo: p.logo_path || null }));
+    return { stream: pick('flatrate').concat(pick('free'), pick('ads')), rent: pick('rent').concat(pick('buy')), link: r.link || null, region: state.region };
+  } catch (e) { return null; }
+}
+// TVmaze (free, no key) gives what TMDB lacks: broadcast time / exact release timestamp per episode
+async function fetchTvmaze(imdbId) {
+  if (!imdbId) return null;
+  try {
+    const r = await fetch(`https://api.tvmaze.com/lookup/shows?imdb=${imdbId}`); if (!r.ok) return null; const s = await r.json();
+    const er = await fetch(`https://api.tvmaze.com/shows/${s.id}/episodes`); const eps = er.ok ? await er.json() : [];
+    const stamps = {}; eps.forEach(e => { if (e.airstamp && e.season && e.number) stamps[epKey(e.season, e.number)] = e.airstamp; });
+    const net = s.network || s.webChannel || {};
+    return { id: s.id, time: s.schedule && s.schedule.time || '', days: s.schedule && s.schedule.days || [], channel: net.name || '', tz: net.country && net.country.timezone || '', web: !s.network && !!s.webChannel, stamps };
+  } catch (e) { return null; }
+}
+async function fetchShow(id) {
+  const d = await tmdb(`/tv/${id}`, { append_to_response: 'external_ids,aggregate_credits,recommendations,similar' });
+  const imdbId = d.external_ids && d.external_ids.imdb_id || null;
+  const [providers, maze] = await Promise.all([fetchProviders(id), fetchTvmaze(imdbId)]);
+  const seasons = (d.seasons || []).filter(s => s.season_number > 0);
+  const castRaw = (d.aggregate_credits && d.aggregate_credits.cast || []).slice(0, 12);
+  const cast = castRaw.map(c => ({ id: c.id, name: c.name, photo: c.profile_path || null, role: (c.roles && c.roles[0] && c.roles[0].character) || '' }));
+  const creators = (d.created_by || []).map(c => ({ id: c.id, name: c.name, photo: c.profile_path || null, role: 'Creator' }));
+  const seen = new Set([id]); const recs = [];
+  for (const r of [...(d.recommendations && d.recommendations.results || []), ...(d.similar && d.similar.results || [])]) { if (!seen.has(r.id) && r.poster_path) { seen.add(r.id); recs.push(slim(r)); } }
+  const imdbRating = await fetchImdbRating(d.external_ids && d.external_ids.imdb_id);
+  // Fetch seasons in small batches (TMDB allows ~40-50 req/s but be polite)
+  const eps = [];
+  for (let i = 0; i < seasons.length; i += 5) {
+    const chunk = seasons.slice(i, i + 5);
+    const res = await Promise.all(chunk.map(s => tmdb(`/tv/${id}/season/${s.season_number}`).catch(() => null)));
+    res.forEach((sd, j) => {
+      if (!sd) return;
+      for (const ep of sd.episodes || []) eps.push({ s: sd.season_number, e: ep.episode_number, name: ep.name || '', air: ep.air_date || null, runtime: ep.runtime || null, over: (ep.overview || '').slice(0, 300) });
+    });
+  }
+  eps.sort((a, b) => a.s - b.s || a.e - b.e);
+  if (maze) for (const ep of eps) { const st = maze.stamps[epKey(ep.s, ep.e)]; if (st) { ep.at = st; const loc = localDate(st); if (loc) ep.air = loc; } }
+  return {
+    providers, maze: maze ? { time: maze.time, days: maze.days, channel: maze.channel, tz: maze.tz, web: maze.web } : null,
+    id: d.id, name: d.name, poster: d.poster_path || null, status: d.status || '', inProd: !!d.in_production,
+    year: (d.first_air_date || '').slice(0, 4), network: (d.networks || []).map(n => n.name).join(', '),
+    imdb: d.external_ids && d.external_ids.imdb_id || null, genres: (d.genres || []).map(g => g.name).join(', '),
+    nextAir: d.next_episode_to_air ? d.next_episode_to_air.air_date : null,
+    vote: d.vote_average || 0, votes: d.vote_count || 0, pop: d.popularity || 0, over: (d.overview || '').slice(0, 400), genreIds: (d.genres || []).map(g => g.id),
+    imdbRating, cast: [...creators, ...cast].slice(0, 14), recs: recs.slice(0, 20),
+    seasonNames: Object.fromEntries(seasons.map(s => [s.season_number, s.name])),
+    eps, fetched: Date.now(), added: state.shows[id] ? state.shows[id].added : Date.now(), archived: state.shows[id] ? !!state.shows[id].archived : false,
+  };
+}
+async function addShow(id) {
+  toast('Loading show…');
+  try {
+    const show = previewShows[id] && !previewShows[id].error ? previewShows[id] : await fetchShow(id); delete previewShows[id];
+    state.shows[id] = show; if (!state.order.includes(id)) state.order.push(id); state.watched[id] = state.watched[id] || {};
+    save(); toast(`Added ${show.name}`); render();
+  } catch (e) { toast('Error: ' + e.message); }
+}
+/* ============ movies ============ */
+const slimM = r => ({ id: r.id, name: r.title || r.name, poster: r.poster_path || null, year: (r.release_date || '').slice(0, 4), release: r.release_date || null, vote: r.vote_average || 0, votes: r.vote_count || 0, pop: r.popularity || 0, over: (r.overview || '').slice(0, 160), genreIds: r.genre_ids || [] });
+async function fetchMovie(id) {
+  const d = await tmdb(`/movie/${id}`, { append_to_response: 'external_ids,credits,recommendations,similar,watch/providers,release_dates' });
+  const wp = (d['watch/providers'] && d['watch/providers'].results || {})[state.region] || {};
+  const pick = k => (wp[k] || []).map(p => ({ name: p.provider_name, logo: p.logo_path || null }));
+  const seen = new Set([id]); const recs = [];
+  for (const r of [...(d.recommendations && d.recommendations.results || []), ...(d.similar && d.similar.results || [])]) { if (!seen.has(r.id) && r.poster_path) { seen.add(r.id); recs.push(slimM(r)); } }
+  const crew = (d.credits && d.credits.crew || []).filter(c => c.job === 'Director').map(c => ({ id: c.id, name: c.name, photo: c.profile_path || null, role: 'Director' }));
+  const cast = (d.credits && d.credits.cast || []).slice(0, 10).map(c => ({ id: c.id, name: c.name, photo: c.profile_path || null, role: c.character || '' }));
+  // local release date for the region, if TMDB has one (theatrical or digital)
+  let localRelease = null; const rd = (d.release_dates && d.release_dates.results || []).find(x => x.iso_3166_1 === state.region);
+  if (rd) { const t = rd.release_dates.filter(x => [3, 4, 2].includes(x.type)).sort((a, b) => a.release_date.localeCompare(b.release_date))[0]; if (t) localRelease = t.release_date.slice(0, 10); }
+  const imdb = d.external_ids && d.external_ids.imdb_id || d.imdb_id || null;
+  const old = state.movies[id] || {};
+  return { id: d.id, name: d.title, poster: d.poster_path || null, backdrop: d.backdrop_path || null, year: (d.release_date || '').slice(0, 4), release: d.release_date || null, localRelease,
+    runtime: d.runtime || 0, vote: d.vote_average || 0, votes: d.vote_count || 0, pop: d.popularity || 0, genres: (d.genres || []).map(g => g.name).join(', '), genreIds: (d.genres || []).map(g => g.id),
+    over: (d.overview || '').slice(0, 600), tagline: d.tagline || '', imdb, imdbRating: await fetchImdbRating(imdb), status: d.status || '',
+    providers: { stream: pick('flatrate').concat(pick('free'), pick('ads')), rent: pick('rent').concat(pick('buy')), region: state.region },
+    cast: [...crew, ...cast].slice(0, 12), recs: recs.slice(0, 20), fetched: Date.now(),
+    list: old.list || 'want', added: old.added || Date.now(), watchedAt: old.watchedAt || null };
+}
+async function addMovie(id, list) {
+  toast('Loading movie…');
+  try { const m = previewMovies[id] && !previewMovies[id].error ? previewMovies[id] : await fetchMovie(id); delete previewMovies[id]; m.list = list; if (list === 'seen') m.watchedAt = m.watchedAt || Date.now(); state.movies[id] = m; save(); toast(list === 'seen' ? `Marked ${m.name} as watched` : `${m.name} added to your watchlist`); render(); }
+  catch (e) { toast('Error: ' + e.message); }
+}
+function setMovieList(id, list) { const m = state.movies[id]; if (!m) return; m.list = list; if (list === 'seen' && !m.watchedAt) m.watchedAt = Date.now(); if (list === 'want') m.watchedAt = null; save(); render(); }
+// pools of popular titles used to pad suggestion rows to a full 6 or 12
+async function loadPools() {
+  if (state.pools && Date.now() - state.pools.at < 24 * 3600 * 1000) return;
+  try {
+    const [tvFresh, tvTop, movPop, movUp, movTop] = await Promise.all([
+      tmdb('/trending/tv/week'), tmdb('/tv/top_rated'), tmdb('/movie/popular', { region: state.region }), tmdb('/movie/upcoming', { region: state.region }), tmdb('/movie/top_rated')]);
+    const okTv = r => r.poster_path && !(r.genre_ids || []).some(g => [10767, 10763, 10764].includes(g));
+    state.pools = { at: Date.now(), tvFresh: (tvFresh.results || []).filter(okTv).map(slim), tvTop: (tvTop.results || []).filter(okTv).map(slim),
+      movPop: (movPop.results || []).filter(r => r.poster_path).map(slimM), movUp: (movUp.results || []).filter(r => r.poster_path).map(slimM), movTop: (movTop.results || []).filter(r => r.poster_path).map(slimM) };
+    save(); if (['home', 'movies', 'show', 'movie'].includes(view.name)) render();
+  } catch (e) {}
+}
+function fill(list, pools, exclude) {
+  // Always return 6 or 12 items when enough material exists
+  const target = list.length >= 12 ? 12 : 6; const out = list.slice(0, target); const ids = new Set(out.map(x => x.id));
+  for (const pool of pools) for (const r of pool) { if (out.length >= target) break; if (ids.has(r.id) || exclude(r.id)) continue; ids.add(r.id); out.push({ ...r, pad: true }); }
+  return out;
+}
+async function refreshShow(id, quiet) {
+  try { const old = state.shows[id]; const fresh = await fetchShow(id); fresh.added = old.added; fresh.archived = old.archived; state.shows[id] = fresh; save(); if (!quiet) toast(`Refreshed ${fresh.name}`); }
+  catch (e) { if (!quiet) toast('Refresh failed: ' + e.message); }
+}
+async function refreshAll(force) {
+  const stale = Object.values(state.shows).filter(s => force || (Date.now() - s.fetched > 20 * 3600 * 1000)).filter(s => !s.archived || force);
+  if (!stale.length) { if (force) toast('Nothing to refresh'); return; }
+  if (force) toast(`Refreshing ${stale.length} show${stale.length > 1 ? 's' : ''}…`);
+  for (const s of stale) await refreshShow(s.id, true);
+  if (force) toast('All shows refreshed');
+  render();
+}
+
+/* ============ routing ============ */
+let view = { name: 'home' };
+function go(name, arg) { view = { name, arg }; navigated = true; render(); window.scrollTo(0, 0); }
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => go(b.dataset.view));
+
+function render() {
+  const navMap = { show: 'shows', episode: 'shows', movie: 'movies', member: 'friends' };
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === (navMap[view.name] || view.name)));
+  const app = $('#app');
+  if (!user) { app.innerHTML = loginHTML(); bindLogin(); return; }
+  if (!CFG.API && !state.apiKey && view.name !== 'settings') { app.innerHTML = setupHTML(); bindSetup(); return; }
+  // context: movies section searches movies, everything else searches shows; people search is filtered the same way
+  const ctx = view.name === 'person' ? (lastCtx || 'tv') : ['movies', 'movie'].includes(view.name) ? 'movie' : 'tv';
+  if (ctx !== lastCtx) { searchMode = ctx; lastCtx = ctx; }
+  // keep scroll position, the query and the results across re-renders so several items can be ticked in a row
+  const y = window.scrollY, q = $('#q') ? $('#q').value : '', res = $('#results') ? $('#results').innerHTML : '';
+  app.innerHTML = searchHTML() + ({ home: homeHTML, calendar: calendarHTML, shows: showsHTML, show: showHTML, settings: settingsHTML, person: personHTML, episode: episodeHTML, movies: moviesHTML, movie: movieHTML, space: spaceHTML, friends: friendsHTML, member: memberHTML }[view.name])();
+  bindSearch(); bindCommon();
+  if (!navigated && q) { $('#q').value = q; $('#results').innerHTML = res; refreshResultButtons($('#results')); bindResultButtons($('#results')); }
+  if (!navigated) requestAnimationFrame(() => window.scrollTo(0, y));
+  navigated = false;
+  if (view.name === 'person') loadPerson();
+  if (view.name === 'friends' && !friendsData.loaded) loadFriends();
+  if (view.name === 'member' && !(memberData && memberData.username === view.arg)) loadMember();
+  if (view.name === 'home') loadFriendsHome();
+  if (view.name === 'episode') loadEpisode();
+  if (view.name === 'show' && !state.shows[view.arg] && !previewShows[view.arg]) loadPreview();
+  if (view.name === 'movie' && !state.movies[view.arg] && !previewMovies[view.arg]) loadPreview();
+  if (['home', 'movies', 'show', 'movie', 'shows'].includes(view.name)) loadPools();
+}
+let lastCtx = null, navigated = true;
+// after an add/seen/want click, swap the buttons in still-visible search results instead of losing them
+function refreshResultButtons(box) {
+  box.querySelectorAll('[data-add], [data-open]').forEach(b => { const id = +(b.dataset.add || b.dataset.open); if (state.shows[id]) b.outerHTML = `<button class="small" data-open="${id}">Open</button>`; });
+  box.querySelectorAll('.row').forEach(row => { const b = row.querySelector('[data-mwant], [data-mopen]'); if (!b) return; const id = +(b.dataset.mwant || b.dataset.mopen); const mine = state.movies[id];
+    if (mine && b.dataset.mwant) { row.querySelectorAll('[data-mwant], [data-mseen]').forEach(x => x.remove()); row.insertAdjacentHTML('beforeend', `<button class="small" data-mopen="${id}">${mine.list === 'seen' ? 'Seen · open' : 'Watchlist · open'}</button>`); } });
+}
+
+/* ============ setup ============ */
+function setupHTML() {
+  return `<div class="panel setup">
+    <h2>Welcome to TVShowManiacs</h2>
+    <p class="muted">This copy of the app has no API proxy configured (see config.js), so it needs a personal TMDB key. Episode data comes from <a href="https://www.themoviedb.org" target="_blank" rel="noopener">TMDB</a>, so you need a free API key first.</p>
+    <div class="help" style="text-align:left;max-width:480px;margin:0 auto"><ol>
+      <li>Create an account at <a href="https://www.themoviedb.org/signup" target="_blank" rel="noopener">themoviedb.org</a></li>
+      <li>Go to <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Settings → API</a> and request a key (choose “Developer”; any personal-use description is fine)</li>
+      <li>Paste either the <b>API Key</b> or the <b>API Read Access Token</b> below</li>
+    </ol></div>
+    <input type="password" id="setupKey" placeholder="TMDB API key or read access token">
+    <button class="primary" id="setupGo">Save and start</button>
+    <p class="help">The key is stored only in this browser.</p>
+  </div>`;
+}
+function bindSetup() {
+  $('#setupGo').onclick = async () => {
+    const k = $('#setupKey').value.trim(); if (!k) return;
+    state.apiKey = k;
+    try { await tmdb('/configuration'); save(); toast('Key works'); go('home'); }
+    catch (e) { state.apiKey = ''; toast('Key rejected: ' + e.message); }
+  };
+  $('#setupKey').onkeydown = e => { if (e.key === 'Enter') $('#setupGo').click(); };
+}
+
+/* ============ search ============ */
+let searchMode = 'tv';
+function searchHTML() {
+  return `<div class="search">
+    <div class="seg"><button data-mode="tv" class="${searchMode === 'tv' ? 'active' : ''}">Shows</button><button data-mode="movie" class="${searchMode === 'movie' ? 'active' : ''}">Movies</button><button data-mode="person" class="${searchMode === 'person' ? 'active' : ''}">People</button></div>
+    <input type="text" id="q" placeholder="${{ tv: 'Search for a show to add…', movie: 'Search for a movie…', person: 'Search an actor, director or creator…' }[searchMode]}" autocomplete="off"><button id="qgo">Search</button></div><div id="results"></div>`;
+}
+function movieResultRow(r, why) {
+  const m = slimM(r); const mine = state.movies[m.id];
+  return `<div class="row">
+    ${m.poster ? `<img class="poster" src="${IMG}w92${m.poster}" alt="" data-mopen="${m.id}" style="cursor:pointer">` : '<div class="poster"></div>'}
+    <div class="grow"><div class="title"><a href="#" data-mopen="${m.id}" style="color:inherit;text-decoration:none">${esc(m.name)}</a> <span class="muted" style="font-weight:400">${m.year}</span> &nbsp;${ratingHTML(m.vote, m.votes)}</div><div class="sub">${why ? `<b>${esc(why)}</b> · ` : ''}${esc(m.over)}</div></div>
+    ${mine ? `<button class="small" data-mopen="${m.id}">${mine.list === 'seen' ? 'Seen · open' : 'Watchlist · open'}</button>` : `<button class="small primary" data-mwant="${m.id}">+ Want</button><button class="small" data-mseen="${m.id}" title="Mark as watched">✓ Seen</button>`}
+  </div>`;
+}
+function ratingHTML(vote, votes, imdb) {
+  const parts = [];
+  if (imdb && imdb.rating) parts.push(`<span class="rating" title="IMDb rating"><span class="imdb">IMDb</span> ${imdb.rating.toFixed(1)}</span>`);
+  if (vote) parts.push(`<span class="rating" title="TMDB user score${votes ? ` (${votes} votes)` : ''}"><span class="star">★</span> ${(+vote).toFixed(1)}</span>`);
+  return parts.join(' &nbsp;');
+}
+function showResultRow(r, why) {
+  const s = slim(r);
+  return `<div class="row">
+    ${s.poster ? `<img class="poster" src="${IMG}w92${s.poster}" alt="" data-show="${s.id}" style="cursor:pointer">` : '<div class="poster"></div>'}
+    <div class="grow"><div class="title"><a href="#" data-show="${s.id}" style="color:inherit;text-decoration:none">${esc(s.name)}</a> <span class="muted" style="font-weight:400">${s.year}</span> &nbsp;${ratingHTML(s.vote, s.votes)}</div><div class="sub">${why ? `<b>${esc(why)}</b> · ` : ''}${esc(s.over)}</div></div>
+    ${state.shows[s.id] ? `<button class="small" data-open="${s.id}">Open</button>` : `<button class="small primary" data-add="${s.id}">Add</button>`}
+  </div>`;
+}
+function bindResultButtons(box) {
+  box.querySelectorAll('[data-add]').forEach(b => b.onclick = () => addShow(+b.dataset.add));
+  box.querySelectorAll('[data-open]').forEach(b => b.onclick = () => go('show', +b.dataset.open));
+  box.querySelectorAll('[data-person]').forEach(b => b.onclick = () => go('person', { id: +b.dataset.person, name: b.dataset.name }));
+  box.querySelectorAll('[data-mwant]').forEach(b => b.onclick = () => addMovie(+b.dataset.mwant, 'want'));
+  box.querySelectorAll('[data-mseen]').forEach(b => b.onclick = () => addMovie(+b.dataset.mseen, 'seen'));
+  box.querySelectorAll('[data-mopen]').forEach(b => b.onclick = e => { e.preventDefault(); go('movie', +b.dataset.mopen); });
+  box.querySelectorAll('[data-show]').forEach(b => b.onclick = e => { e.preventDefault(); go('show', +b.dataset.show); });
+}
+function bindSearch() {
+  const q = $('#q'); let t;
+  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { searchMode = b.dataset.mode; navigated = true; render(); $('#q').focus(); });
+  const run = async () => {
+    const term = q.value.trim(); const box = $('#results');
+    if (term.length < 2) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="panel muted">Searching…</div>';
+    try {
+      if (searchMode === 'tv') {
+        const d = await tmdb('/search/tv', { query: term, include_adult: 'false' });
+        const list = (d.results || []).slice(0, 8);
+        if (!list.length) { box.innerHTML = '<div class="panel muted">No results</div>'; return; }
+        box.innerHTML = `<div class="panel"><h2>Shows</h2>${list.map(r => showResultRow(r)).join('')}</div>`;
+      } else if (searchMode === 'movie') {
+        const d = await tmdb('/search/movie', { query: term, include_adult: 'false', region: state.region });
+        const list = (d.results || []).slice(0, 8);
+        if (!list.length) { box.innerHTML = '<div class="panel muted">No results</div>'; return; }
+        box.innerHTML = `<div class="panel"><h2>Movies</h2>${list.map(r => movieResultRow(r)).join('')}</div>`;
+      } else {
+        const d = await tmdb('/search/person', { query: term, include_adult: 'false' });
+        const list = (d.results || []).filter(p => p.known_for_department !== 'Sound').slice(0, 8);
+        if (!list.length) { box.innerHTML = '<div class="panel muted">No results</div>'; return; }
+        box.innerHTML = `<div class="panel"><h2>People</h2>${list.map(p => `<div class="row">
+          ${p.profile_path ? `<img class="poster" src="${IMG}w92${p.profile_path}" alt="" style="border-radius:50%;width:48px;height:48px">` : '<div class="poster" style="border-radius:50%;width:48px;height:48px"></div>'}
+          <div class="grow"><div class="title">${esc(p.name)}</div><div class="sub">${esc(p.known_for_department || '')}${(p.known_for || []).length ? ' · ' + esc(p.known_for.map(k => k.name || k.title).join(', ')) : ''}</div></div>
+          <button class="small primary" data-person="${p.id}" data-name="${esc(p.name)}">${lastCtx === 'movie' ? 'See movies' : 'See shows'}</button></div>`).join('')}</div>`;
+      }
+      bindResultButtons(box);
+    } catch (e) { box.innerHTML = `<div class="panel muted">Search failed: ${esc(e.message)}</div>`; }
+  };
+  q.oninput = () => { clearTimeout(t); t = setTimeout(run, 350); };
+  q.onkeydown = e => { if (e.key === 'Enter') { clearTimeout(t); run(); } };
+  $('#qgo').onclick = run;
+}
+/* ============ person page ============ */
+let personKind = 'tv'; const personCache = {};
+let personShown = null;
+function personHTML() { if (personShown !== view.arg.id) { personKind = view.arg.kind || lastCtx || 'tv'; personShown = view.arg.id; } return `<div class="panel" id="personBox"><h2>${esc(view.arg.name)}</h2><div class="muted">Loading credits…</div></div>`; }
+async function loadPerson() {
+  const box = $('#personBox'); if (!box) return;
+  try {
+    const d = personCache[view.arg.id] || (personCache[view.arg.id] = await tmdb(`/person/${view.arg.id}`, { append_to_response: 'tv_credits,movie_credits' }));
+    const mById = {};
+    const mpush = (c, why) => { if (!c.poster_path) return; if (!mById[c.id]) mById[c.id] = { c, why: [] }; if (!mById[c.id].why.includes(why)) mById[c.id].why.push(why); };
+    (d.movie_credits && d.movie_credits.cast || []).forEach(c => mpush(c, c.character ? `as ${c.character}` : 'Cast'));
+    (d.movie_credits && d.movie_credits.crew || []).forEach(c => mpush(c, c.job || c.department || 'Crew'));
+    const movies = Object.values(mById).sort((a, b) => b.c.vote_count - a.c.vote_count).slice(0, 30);
+    const byId = {};
+    const push = (c, why) => { if (!c.poster_path) return; const k = c.id; if (!byId[k]) byId[k] = { c, why: [], eps: 0 }; if (!byId[k].why.includes(why)) byId[k].why.push(why); byId[k].eps = Math.max(byId[k].eps, c.episode_count || 0); };
+    (d.tv_credits && d.tv_credits.cast || []).forEach(c => push(c, c.character ? `as ${c.character}` : 'Cast'));
+    (d.tv_credits && d.tv_credits.crew || []).forEach(c => push(c, c.job || c.department || 'Crew'));
+    const list = Object.values(byId).filter(x => x.c.genre_ids && !x.c.genre_ids.includes(10767) && !x.c.genre_ids.includes(10763)) // drop talk shows / news
+      .sort((a, b) => (b.eps * 10 + b.c.vote_count / 100) - (a.eps * 10 + a.c.vote_count / 100)).slice(0, 40);
+    if (!box.isConnected) return;
+    box.innerHTML = `<div class="detail-head">${d.profile_path ? `<img class="poster lg" src="${IMG}w342${d.profile_path}" alt="" style="border-radius:50%;width:92px;height:92px">` : ''}
+      <div class="grow" style="min-width:0"><h2>${esc(d.name)}</h2><div class="meta">${esc(d.known_for_department || '')}${d.birthday ? ` · born ${d.birthday}` : ''}${d.place_of_birth ? ` · ${esc(d.place_of_birth)}` : ''}</div>
+      <div class="help" style="margin-top:6px">${esc((d.biography || '').slice(0, 400))}${(d.biography || '').length > 400 ? '…' : ''}</div></div></div>
+      <div class="tabs" style="margin-top:16px"><button data-pkind="tv" class="${personKind === 'tv' ? 'active' : ''}">TV shows (${list.length})</button><button data-pkind="movie" class="${personKind === 'movie' ? 'active' : ''}">Movies (${movies.length})</button></div>
+      ${personKind === 'tv' ? (list.length ? list.map(x => showResultRow(x.c, x.why.join(', ') + (x.eps ? ` · ${x.eps} ep` : ''))).join('') : '<div class="empty">No TV credits found.</div>')
+        : (movies.length ? movies.map(x => movieResultRow(x.c, x.why.join(', '))).join('') : '<div class="empty">No movie credits found.</div>')}`;
+    box.querySelectorAll('[data-pkind]').forEach(b => b.onclick = () => { personKind = b.dataset.pkind; loadPerson(); });
+    bindResultButtons(box);
+  } catch (e) { box.innerHTML = `<div class="panel muted">Could not load: ${esc(e.message)}</div>`; }
+}
+
+/* ============ suggestions ============ */
+const THIS_YEAR = +TODAY.slice(0, 4);
+function suggestions() {
+  const tracked = new Set(Object.keys(state.shows).map(Number)); const dismissed = new Set(state.dismissed || []);
+  const scores = {};
+  for (const s of Object.values(state.shows)) {
+    if (s.archived || !s.recs) continue;
+    const p = progress(s); const w = p.total ? Math.max(0.25, p.watched / p.total) : 0.5;
+    s.recs.forEach((r, i) => { if (tracked.has(r.id) || dismissed.has(r.id)) return;
+      const sc = scores[r.id] || (scores[r.id] = { r, score: 0, from: [] });
+      sc.score += w * (1 - i / 40); if (!sc.from.includes(s.name)) sc.from.push(s.name); });
+  }
+  const all = Object.values(scores).map(x => ({ ...x.r, from: x.from, score: x.score * (0.6 + Math.min(x.r.vote, 9) / 15) })).sort((a, b) => b.score - a.score);
+  return { fresh: all.filter(x => +x.year >= THIS_YEAR - 1), classics: all.filter(x => +x.year < THIS_YEAR - 1) };
+}
+function movieSuggestions() {
+  const dismissed = new Set(state.dismissedM); const scores = {};
+  for (const m of Object.values(state.movies)) { const w = m.list === 'seen' ? 1 : 0.6;
+    (m.recs || []).forEach((r, i) => { if (state.movies[r.id] || dismissed.has(r.id)) return; const sc = scores[r.id] || (scores[r.id] = { r, score: 0, from: [] }); sc.score += w * (1 - i / 40); if (!sc.from.includes(m.name)) sc.from.push(m.name); }); }
+  return Object.values(scores).map(x => ({ ...x.r, from: x.from, score: x.score * (0.6 + Math.min(x.r.vote, 9) / 15) })).sort((a, b) => b.score - a.score);
+}
+const excludeTv = id => !!state.shows[id] || state.dismissed.includes(id);
+const excludeMov = id => !!state.movies[id] || state.dismissedM.includes(id);
+function recCard(r, why, tag, kind) {
+  kind = kind || 'tv';
+  const btns = kind === 'tv'
+    ? (state.shows[r.id] ? `<button class="small" data-open="${r.id}" style="flex:1">Open</button>` : `<button class="small primary" data-add="${r.id}" style="flex:1">+ Add</button><button class="small ghost" data-dismiss="${r.id}" title="Not interested">✕</button>`)
+    : (state.movies[r.id] ? `<button class="small" data-mopen="${r.id}" style="flex:1">Open</button>` : `<button class="small primary" data-mwant="${r.id}" style="flex:1" title="Add to watchlist">+ Want</button><button class="small" data-mseen="${r.id}" title="Mark as watched">✓</button><button class="small ghost" data-mdismiss="${r.id}" title="Not interested">✕</button>`);
+  const m = kind === 'movie' && state.movies[r.id];
+  return `<div class="card rec" data-rec="${r.id}" ${kind === 'tv' ? `data-show="${r.id}"` : `data-mopen="${r.id}"`} title="${esc(r.over)}">
+    <img src="${IMG}w342${r.poster}" alt="" loading="lazy">${r.vote ? `<span class="rt">★ ${(+r.vote).toFixed(1)}</span>` : ''}${m ? `<span class="tag ${m.list}">${m.list === 'seen' ? 'SEEN' : 'WANT'}</span>` : tag ? `<span class="tag">${tag}</span>` : ''}
+    <div class="body"><div class="name">${esc(r.name)}</div><div class="sub">${r.year || (r.release ? r.release : '')}${kind === 'movie' && r.release && r.release > TODAY ? ` · ${relDay(r.release)}` : ''}</div>${why ? `<div class="why">${esc(why)}</div>` : ''}
+    <div class="split" style="margin-top:6px">${btns}</div></div></div>`;
+}
+const gridSec = (title, list, fn, note) => list.length ? `<div class="panel"><h2>${title}</h2><div class="grid six">${list.map(fn).join('')}</div>${note ? `<p class="help" style="margin:10px 0 0">${note}</p>` : ''}</div>` : '';
+function suggestionsHTML() {
+  const { fresh, classics } = suggestions(); const P = state.pools || {};
+  const why = x => x.pad ? (x.from ? '' : 'Popular right now') : 'Because you watch ' + x.from[0];
+  const freshL = fill(fresh, [P.tvFresh || [], P.tvTop || []], excludeTv), classicsL = fill(classics, [P.tvTop || []], id => excludeTv(id) || freshL.some(x => x.id === id));
+  return gridSec('Suggested for you · new & current', freshL, x => recCard(x, why(x), +x.year >= THIS_YEAR ? 'NEW' : ''))
+    + gridSec('Suggested for you · older gems', classicsL, x => recCard(x, x.pad ? 'All-time top rated' : why(x)));
+}
+
+/* ============ views ============ */
+function showRow(show, ep, right) {
+  return `<div class="row">
+    ${show.poster ? `<img class="poster" src="${IMG}w92${show.poster}" alt="">` : '<div class="poster"></div>'}
+    <div class="grow"><div class="title"><a href="#" data-show="${show.id}" style="color:inherit;text-decoration:none">${esc(show.name)}</a></div>
+    <div class="sub">${ep ? `${code(ep.s, ep.e)} · ${esc(ep.name)}` : ''}${show.providers && show.providers.stream.length ? ` · <span title="Where to watch">${esc(show.providers.stream[0].name)}</span>` : (show.network ? ` · ${esc(show.network)}` : '')}</div></div>${right || ''}</div>`;
+}
+function homeHTML() {
+  const active = state.order.map(id => state.shows[id]).filter(s => s && !s.archived);
+  if (!Object.keys(state.shows).length) return `<div class="panel empty">No shows yet — search above to add your first one.</div>` + suggestionsHTML();
+  const next = active.map(s => ({ s, ep: nextToWatch(s) })).filter(x => x.ep)
+    .sort((a, b) => (b.ep.air || '').localeCompare(a.ep.air || ''));
+  const upNext = active.flatMap(s => upcoming(s).slice(0, 1).map(ep => ({ s, ep }))).sort((a, b) => a.ep.air.localeCompare(b.ep.air)).slice(0, 8);
+  const caughtUp = active.filter(s => !nextToWatch(s));
+  return `
+  <div class="panel"><h2>Watch next</h2>${next.length ? next.map(({ s, ep }) => showRow(s, ep, `
+      <span class="badge ${ep.air === TODAY ? 'today' : (ep.air >= addDays(-7) ? 'new' : '')}">${relDay(ep.air)}</span>
+      <button class="small" data-watch="${s.id}|${ep.s}|${ep.e}">✓ Watched</button>`)).join('') : '<div class="empty">You’re caught up on everything.</div>'}</div>
+  <div class="panel"><h2>Coming up</h2>${upNext.length ? upNext.map(({ s, ep }) => showRow(s, ep, `<span class="badge ${ep.air === TODAY ? 'today' : ''}">${relDay(ep.air)}${ep.at ? ' · ' + localTime(ep.at) : ''}</span>`)).join('') : '<div class="empty">No scheduled episodes. Check the calendar for shows with unknown dates.</div>'}</div>
+  ${homeFriends && homeFriends.length ? gridSec('Friends are watching', homeFriends.filter(r => r.poster && !state.shows[r.item_id]).slice(0, 6), r => friendCard(r, 'tv')) : ''}
+  ${caughtUp.length ? `<div class="panel"><h2>Caught up (${caughtUp.length})</h2><div class="muted" style="font-size:13px">${caughtUp.map(s => `<a href="#" data-show="${s.id}" style="color:inherit">${esc(s.name)}</a>`).join(' · ')}</div></div>` : ''}
+  ${suggestionsHTML()}`;
+}
+function addDays(n) { const d = new Date(TODAY + 'T12:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+function calendarHTML() {
+  const active = Object.values(state.shows).filter(s => !s.archived);
+  const items = active.flatMap(s => s.eps.filter(ep => ep.air && ep.air >= addDays(-7)).map(ep => ({ s, ep })));
+  items.sort((a, b) => a.ep.air.localeCompare(b.ep.air) || a.s.name.localeCompare(b.s.name));
+  const byDay = {}; items.forEach(x => (byDay[x.ep.air] = byDay[x.ep.air] || []).push(x));
+  const tba = active.filter(s => (s.inProd || /Returning/i.test(s.status)) && !upcoming(s).length);
+  const days = Object.keys(byDay).sort();
+  return `<div class="panel"><div class="split" style="justify-content:space-between;align-items:center">
+    <h2 style="margin:0">Calendar · last 7 days and upcoming</h2>
+    <button class="small" id="ics">📅 Export calendar (.ics)</button></div>
+    ${days.length ? days.map(day => `<div class="date-head">${day === TODAY ? '<span class="badge today">Today</span>' : ''}${fmtDate(day, { weekday: 'long', day: 'numeric', month: 'long' })}<small>${day < TODAY ? relDay(day) : ''}</small></div>
+      ${byDay[day].map(({ s, ep }) => showRow(s, ep, isWatched(s.id, ep.s, ep.e) ? '<span class="badge">Watched</span>' : (aired(ep) ? `<button class="small" data-watch="${s.id}|${ep.s}|${ep.e}">✓ Watched</button>` : (ep.at ? `<span class="badge">${localTime(ep.at)}</span>` : '')))).join('')}`).join('')
+      : '<div class="empty">Nothing scheduled.</div>'}
+  </div>
+  ${tba.length ? `<div class="panel"><h2>Returning, date unknown</h2>${tba.map(s => showRow(s, null, `<span class="badge">${esc(s.status)}</span>`)).join('')}</div>` : ''}`;
+}
+let showsTab = 'watching';
+function showsHTML() {
+  const all = state.order.map(id => state.shows[id]).filter(Boolean);
+  const card = s => { const p = progress(s); const nx = nextToWatch(s); const up = upcoming(s)[0];
+    return `<div class="card" data-show="${s.id}">
+      ${s.poster ? `<img src="${IMG}w342${s.poster}" alt="" loading="lazy">` : '<div style="aspect-ratio:2/3;background:var(--panel-2)"></div>'}
+      <div class="body"><div class="name">${esc(s.name)}</div>
+      <div class="sub">${nx ? `${p.total - p.watched} to watch · next ${code(nx.s, nx.e)}` : up ? `Caught up · next ${relDay(up.air)}` : /Ended|Canceled/.test(s.status) ? 'Finished' : 'Caught up'}</div>
+      ${s.providers && s.providers.stream.length ? `<div class="why">📺 ${esc(s.providers.stream.map(x => x.name).slice(0, 2).join(', '))}</div>` : (s.network ? `<div class="why">📡 ${esc(s.network)}</div>` : '')}
+      ${barHTML(s, p)}</div></div>`; };
+  const act = all.filter(s => !s.archived), arch = all.filter(s => s.archived);
+  const watching = act.filter(s => progress(s).watched > 0 && nextToWatch(s));
+  const watchlist = act.filter(s => progress(s).watched === 0);
+  const finished = act.filter(s => !nextToWatch(s) && progress(s).total > 0 && /Ended|Canceled/.test(s.status));
+  const caught = act.filter(s => !nextToWatch(s) && !finished.includes(s));
+  const upList = act.flatMap(s => upcoming(s).slice(0, 1).map(ep => ({ s, ep }))).sort((a, b) => a.ep.air.localeCompare(b.ep.air));
+  const tba = act.filter(s => (s.inProd || /Returning|In Production|Planned/i.test(s.status)) && !upcoming(s).length);
+  const tabs = [['watching', `Watching (${watching.length})`], ['watchlist', `Watchlist (${watchlist.length})`], ['upcoming', `Upcoming (${upList.length + tba.length})`], ['done', `Caught up & finished (${caught.length + finished.length})`], ['foryou', 'Suggestions']];
+  if (arch.length) tabs.push(['archived', `Archived (${arch.length})`]);
+  const grid = (list, empty) => list.length ? `<div class="grid">${list.map(card).join('')}</div>` : `<div class="empty">${empty}</div>`;
+  let body = '';
+  if (moviesTabGuard(showsTab, tabs)) showsTab = 'watching';
+  if (showsTab === 'watching') body = grid(watching.sort((a, b) => (nextToWatch(b).air || '').localeCompare(nextToWatch(a).air || '')), 'Nothing in progress. Start a show from your watchlist.');
+  else if (showsTab === 'watchlist') body = grid(watchlist.sort((a, b) => b.added - a.added), 'Empty. Search a show above and add it — it stays here until you tick a first episode.');
+  else if (showsTab === 'upcoming') body = (upList.length ? `<h2>Next episodes</h2>${upList.map(({ s, ep }) => showRow(s, ep, `<span class="badge ${ep.air === TODAY ? 'today' : ''}">${relDay(ep.air)}${ep.at ? ' · ' + localTime(ep.at) : ''}</span>`)).join('')}` : '<div class="empty">No scheduled episodes.</div>')
+    + (tba.length ? `<h2 style="margin-top:16px">Returning, date unknown</h2>${tba.map(s => showRow(s, null, `<span class="badge">${esc(s.status)}</span>`)).join('')}` : '');
+  else if (showsTab === 'done') body = (caught.length ? `<h2>Caught up · waiting for new episodes</h2>${grid(caught)}` : '') + (finished.length ? `<h2 style="margin-top:16px">Finished</h2>${grid(finished)}` : '') || '<div class="empty">Nothing here yet.</div>';
+  else if (showsTab === 'foryou') body = suggestionsHTML().replace(/<div class="panel">/g, '<div>') || '<div class="empty">Add a few shows and suggestions will appear.</div>';
+  else body = grid(arch, 'No archived shows.');
+  return `<div class="panel"><div class="tabs">${tabs.map(([k, l]) => `<button data-stab="${k}" class="${k === showsTab ? 'active' : ''}">${l}</button>`).join('')}</div>${body}</div>`;
+}
+function moviesTabGuard(tab, tabs) { return !tabs.some(([k]) => k === tab); }
+const previewShows = {}, previewMovies = {};
+async function loadPreview() {
+  const id = view.arg; const isMovie = view.name === 'movie';
+  try { if (isMovie) previewMovies[id] = await fetchMovie(id); else previewShows[id] = await fetchShow(id); }
+  catch (e) { (isMovie ? previewMovies : previewShows)[id] = { error: e.message }; }
+  if (view.name === (isMovie ? 'movie' : 'show') && view.arg === id) { navigated = true; render(); }
+}
+function showHTML() {
+  const s = state.shows[view.arg] || previewShows[view.arg];
+  if (!s) return '<div class="panel empty">Loading show…</div>';
+  if (s.error) return `<div class="panel empty">Could not load: ${esc(s.error)}</div>`;
+  const preview = !state.shows[view.arg];
+  const p = progress(s); const nx = nextToWatch(s); const up = upcoming(s)[0];
+  const seasons = [...new Set(s.eps.map(e => e.s))];
+  const openSeason = nx ? nx.s : (seasons[seasons.length - 1]);
+  return `<div class="panel">
+    <div class="detail-head">
+      ${s.poster ? `<img class="poster lg" src="${IMG}w342${s.poster}" alt="">` : '<div class="poster lg"></div>'}
+      <div class="grow" style="min-width:0">
+        <h2>${esc(s.name)} <span class="muted" style="font-weight:400">${s.year}</span></h2>
+        <div class="meta">${esc([s.network, s.genres].filter(Boolean).join(' · '))}</div>
+        <div class="meta" style="margin-top:4px">${ratingHTML(s.vote, s.votes, s.imdbRating)}${!s.imdbRating && s.imdb && !state.omdbKey ? ` <span class="help">(add an OMDb key in Settings for IMDb ratings)</span>` : ''}</div>
+        ${providersHTML(s)}${airsLine(s)}
+        <div class="meta" style="margin-top:4px"><span class="badge ${/Ended|Canceled/.test(s.status) ? 'ended' : ''}">${esc(s.status || '?')}</span>
+          &nbsp; ${preview ? `${p.total} episodes aired` : `${p.watched}/${p.total} episodes watched`}${up ? ` · next episode ${relDay(up.air)} (${code(up.s, up.e)})` : ''}</div>
+        ${s.over ? `<div class="help" style="margin-top:6px">${esc(s.over)}</div>` : ''}
+        ${preview ? '' : barHTML(s, p, 'max-width:320px')}
+        ${preview ? `<div class="actions"><button class="primary" data-add="${s.id}">+ Add to my shows</button>${s.imdb ? `<a class="small muted" style="align-self:center;font-size:13px" href="https://www.imdb.com/title/${s.imdb}/" target="_blank" rel="noopener">IMDb ↗</a>` : ''}</div>
+        <div class="help" style="margin-top:8px">Not in your shows yet — browse the episodes below, then add it to start tracking.</div>` : `<div class="actions">
+          ${nx ? `<button class="primary small" data-watch="${s.id}|${nx.s}|${nx.e}">✓ Watched ${code(nx.s, nx.e)}</button>` : ''}
+          ${nx ? `<button class="small" data-season="${s.id}|${nx.s}|1" title="Mark every aired episode of season ${nx.s} as watched">✓ Whole season ${nx.s}</button>` : ''}
+          ${p.watched < p.total ? `<button class="small" data-allshow="${s.id}" title="Mark every aired episode as watched">✓ Whole show</button>` : ''}
+          <button class="small" id="refresh">↻ Refresh</button>
+          <button class="small" id="archive">${s.archived ? 'Unarchive' : 'Archive'}</button>
+          <button class="small ghost" id="remove">Remove</button>
+          ${s.imdb ? `<a class="small muted" style="align-self:center;font-size:13px" href="https://www.imdb.com/title/${s.imdb}/" target="_blank" rel="noopener">IMDb ↗</a>` : ''}
+        </div>
+        <div class="help" style="margin-top:8px">Updated ${new Date(s.fetched).toLocaleString()}</div>`}
+      </div>
+    </div>
+    ${seasons.map(sn => { const eps = s.eps.filter(e => e.s === sn); const a = eps.filter(aired); const w = a.filter(e => isWatched(s.id, e.s, e.e)).length; const open = sn === openSeason;
+      return `<div class="season">
+        <div class="season-head" data-toggle="${sn}"><h3>${esc(s.seasonNames[sn] || 'Season ' + sn)} <span class="muted" style="font-weight:400;font-size:13px">${w}/${a.length}${eps.length > a.length ? ` · ${eps.length - a.length} upcoming` : ''}</span></h3>
+          ${a.length && !preview ? `<button class="small" data-season="${s.id}|${sn}|${w < a.length ? 1 : 0}">${w < a.length ? 'Mark all watched' : 'Unwatch all'}</button>` : ''}<span class="muted">${open ? '▾' : '▸'}</span></div>
+        <div id="season-${sn}" ${open ? '' : 'hidden'}>${eps.map(ep => `<div class="ep ${aired(ep) ? '' : 'future'}">
+          ${preview ? '<div></div>' : `<div class="chk ${isWatched(s.id, ep.s, ep.e) ? 'on' : ''}" data-toggle-ep="${s.id}|${ep.s}|${ep.e}" role="checkbox" aria-checked="${isWatched(s.id, ep.s, ep.e)}">✓</div>`}
+          <div class="num">${code(ep.s, ep.e).slice(3)}</div>
+          <div class="n"><div class="t lnk" data-ep="${s.id}|${ep.s}|${ep.e}" title="Episode details">${esc(ep.name) || code(ep.s, ep.e)}</div></div>
+          <div class="d">${ep.air ? (ep.air > TODAY ? relDay(ep.air) : fmtDate(ep.air, { day: 'numeric', month: 'short', year: 'numeric' })) : 'TBA'}${ep.at && ep.air >= TODAY ? ` ${localTime(ep.at)}` : ''}${ep.runtime ? ` · ${ep.runtime}m` : ''}</div>
+        </div>`).join('')}</div>
+      </div>`; }).join('')}
+  </div>
+  ${s.cast && s.cast.length ? `<div class="panel"><h2>Cast & creators · tap a name to see their other shows</h2><div class="strip">${s.cast.map(c => `<div class="person" data-person="${c.id}" data-name="${esc(c.name)}">${c.photo ? `<img src="${IMG}w185${c.photo}" alt="">` : '<div class="ph"></div>'}<div class="pn">${esc(c.name)}</div><div class="pc">${esc(c.role)}</div></div>`).join('')}</div></div>` : ''}
+  ${showRecsHTML(s)}`;
+}
+function showRecsHTML(s) {
+  const dismissed = new Set(state.dismissed || []); const P = state.pools || {};
+  const base = (s.recs || []).filter(r => !dismissed.has(r.id));
+  const list = fill(base, [P.tvFresh || [], P.tvTop || []], id => id === s.id || dismissed.has(id));
+  if (!list.length) return '';
+  const shared = r => { const g = (r.genreIds || []).filter(x => (s.genreIds || []).includes(x)).length; return g ? `${g} genre${g > 1 ? 's' : ''} in common` : 'Viewers also watch'; };
+  return gridSec(`If you like ${esc(s.name)}`, list, r => recCard(r, state.shows[r.id] ? 'Already in your shows' : r.pad ? 'Popular right now' : shared(r), +r.year >= THIS_YEAR ? 'NEW' : ''),
+    'Ranked by TMDB recommendations and similarity (shared genres, keywords, cast, popularity).');
+}
+function movieRecsHTML(m) {
+  const P = state.pools || {}; const base = (m.recs || []).filter(r => !state.dismissedM.includes(r.id));
+  const list = fill(base, [P.movPop || [], P.movTop || []], id => id === m.id || state.dismissedM.includes(id));
+  if (!list.length) return '';
+  const shared = r => { const g = (r.genreIds || []).filter(x => (m.genreIds || []).includes(x)).length; return g ? `${g} genre${g > 1 ? 's' : ''} in common` : 'Viewers also watch'; };
+  return gridSec(`If you liked ${esc(m.name)}`, list, r => recCard(r, r.pad ? 'Popular right now' : shared(r), '', 'movie'));
+}
+/* ============ episode page ============ */
+const epCache = {};
+function episodeHTML() {
+  const { id, s: sn, e: en } = view.arg; const s = state.shows[id] || previewShows[id]; if (!s || s.error) return '<div class="panel empty">Show not found.</div>';
+  const preview = !state.shows[id];
+  const ep = s.eps.find(x => x.s === sn && x.e === en); if (!ep) return '<div class="panel empty">Episode not found.</div>';
+  const idx = s.eps.indexOf(ep); const prev = s.eps[idx - 1], next = s.eps[idx + 1]; const w = isWatched(id, sn, en);
+  const rt = ep.runtime || avgRuntime(s);
+  const when = ep.air ? `${fmtDate(ep.air, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}${ep.at ? ` at ${localTime(ep.at)} (your time)` : ''}` : 'Date TBA';
+  return `<div class="panel">
+    <div class="help" style="margin-bottom:8px"><a href="#" data-show="${id}">${esc(s.name)}</a> › ${esc(s.seasonNames[sn] || 'Season ' + sn)}</div>
+    <div class="detail-head" style="flex-wrap:wrap">
+      <div id="epStill" style="flex:1 1 320px;min-width:0"><div class="still"></div></div>
+      <div class="grow" style="flex:1 1 280px;min-width:0">
+        <h2>${code(sn, en)} · ${esc(ep.name)}</h2>
+        <div class="meta">${w && !preview ? `<span class="badge new">Watched ${new Date(state.watched[id][epKey(sn, en)]).toLocaleDateString()}</span>` : aired(ep) ? '<span class="badge">Not watched yet</span>' : `<span class="badge today">${relDay(ep.air)}</span>`}</div>
+        <div class="facts">
+          <div class="fact"><div class="k">${aired(ep) ? 'Aired' : 'Screening'}</div><div class="v">${when}</div></div>
+          <div class="fact"><div class="k">Length</div><div class="v">${rt ? rt + ' min' : '—'}</div></div>
+          <div class="fact"><div class="k">Where</div><div class="v">${esc(s.providers && s.providers.stream.length ? s.providers.stream.map(x => x.name).join(', ') : (s.maze && s.maze.channel) || s.network || '—')}</div></div>
+          <div class="fact" id="epRating"><div class="k">Rating</div><div class="v">${ratingHTML(s.vote, s.votes, s.imdbRating) || '—'} <span class="help">(show)</span></div></div>
+        </div>
+        <div class="actions">
+          ${preview ? `<button class="small primary" data-add="${id}">+ Add show to track</button>` : aired(ep) ? `<button class="small ${w ? '' : 'primary'}" data-toggle-ep="${id}|${sn}|${en}">${w ? 'Mark unwatched' : '✓ Mark watched'}</button>` : ''}
+          ${prev ? `<button class="small" data-epnav="${id}|${prev.s}|${prev.e}">‹ ${prev.s !== sn ? `Previous season · ${code(prev.s, prev.e)}` : code(prev.s, prev.e)}</button>` : ''}
+          ${next ? `<button class="small" data-epnav="${id}|${next.s}|${next.e}">${next.s !== sn ? `Next season · ${code(next.s, next.e)}` : code(next.s, next.e)} ›</button>` : ''}
+        </div>
+      </div>
+    </div>
+    <h2 style="margin-top:18px">Synopsis</h2>
+    <div id="epOver">${ep.over ? esc(ep.over) : '<span class="muted">Loading…</span>'}</div>
+    <div id="epExtra"></div>
+  </div>`;
+}
+async function loadEpisode() {
+  const { id, s: sn, e: en } = view.arg; const k = `${id}-${sn}-${en}`;
+  try {
+    const d = epCache[k] || (epCache[k] = await tmdb(`/tv/${id}/season/${sn}/episode/${en}`, { append_to_response: 'credits' }));
+    if (view.name !== 'episode' || view.arg.id !== id || view.arg.s !== sn || view.arg.e !== en) return;
+    if (d.still_path) $('#epStill').innerHTML = `<img class="still" src="${IMG}w780${d.still_path}" alt="">`;
+    $('#epOver').innerHTML = d.overview ? esc(d.overview) : '<span class="muted">No synopsis available yet.</span>';
+    if (d.vote_count) $('#epRating .v').innerHTML = `<span class="rating"><span class="star">★</span> ${(+d.vote_average).toFixed(1)}</span> <span class="help">(${d.vote_count} votes, this episode)</span>`;
+    const dir = (d.crew || []).filter(c => c.job === 'Director').map(c => c.name), wr = (d.crew || []).filter(c => /Writer|Teleplay|Story/.test(c.job)).map(c => c.name);
+    const guests = (d.guest_stars || []).slice(0, 10);
+    $('#epExtra').innerHTML = `${dir.length || wr.length ? `<div class="help" style="margin-top:10px">${dir.length ? `Directed by ${esc(dir.join(', '))}` : ''}${dir.length && wr.length ? ' · ' : ''}${wr.length ? `Written by ${esc([...new Set(wr)].join(', '))}` : ''}</div>` : ''}
+      ${guests.length ? `<h2 style="margin-top:16px">Guest stars</h2><div class="strip">${guests.map(c => `<div class="person" data-person="${c.id}" data-name="${esc(c.name)}">${c.profile_path ? `<img src="${IMG}w185${c.profile_path}" alt="">` : '<div class="ph"></div>'}<div class="pn">${esc(c.name)}</div><div class="pc">${esc(c.character || '')}</div></div>`).join('')}</div>` : ''}`;
+    $('#epExtra').querySelectorAll('.person').forEach(b => b.onclick = () => go('person', { id: +b.dataset.person, name: b.dataset.name }));
+  } catch (e) { if ($('#epOver')) $('#epOver').innerHTML = `<span class="muted">Could not load details: ${esc(e.message)}</span>`; }
+}
+function avgRuntime(s) { const r = s.eps.filter(e => e.runtime).map(e => e.runtime); return r.length ? Math.round(r.reduce((a, b) => a + b, 0) / r.length) : 45; }
+
+/* ============ movies views ============ */
+let moviesTab = 'want';
+const REGIONS = [['FR','France'],['TN','Tunisia'],['US','United States'],['GB','United Kingdom'],['DE','Germany'],['ES','Spain'],['IT','Italy'],['CA','Canada'],['BE','Belgium'],['CH','Switzerland']];
+const regionName = c => (REGIONS.find(r => r[0] === (c || state.region)) || [c, c || state.region])[1];
+function movieCard(m) {
+  const up = m.release && m.release > TODAY; const rel = m.localRelease && m.localRelease !== m.release ? m.localRelease : m.release;
+  return `<div class="card rec" data-mopen="${m.id}" title="${esc(m.over)}">
+    ${m.poster ? `<img src="${IMG}w342${m.poster}" alt="" loading="lazy">` : '<div style="aspect-ratio:2/3;background:var(--panel-2)"></div>'}${m.vote ? `<span class="rt">★ ${(+m.vote).toFixed(1)}</span>` : ''}<span class="tag ${m.list}">${m.list === 'seen' ? 'SEEN' : up ? relDay(rel).toUpperCase() : 'WANT'}</span>
+    <div class="body"><div class="name">${esc(m.name)}</div><div class="sub">${m.year}${m.runtime ? ` · ${m.runtime} min` : ''}</div>
+    <div class="why">${m.list === 'seen' && m.watchedAt ? 'Watched ' + new Date(m.watchedAt).toLocaleDateString() : m.providers && m.providers.stream.length ? '📺 ' + esc(m.providers.stream.map(x => x.name).slice(0, 2).join(', ')) : up ? 'Releases ' + fmtDate(rel) : m.providers && m.providers.rent.length ? 'Rent/buy' : 'Not streaming in ' + regionName(m.providers && m.providers.region)}</div>
+    <div class="split" style="margin-top:6px">${m.list === 'seen' ? `<button class="small" data-mlist="${m.id}|want" style="flex:1">Move to watchlist</button>` : `<button class="small primary" data-mlist="${m.id}|seen" style="flex:1">✓ Seen</button>`}<button class="small ghost" data-mremove="${m.id}" title="Remove">✕</button></div></div></div>`;
+}
+function moviesHTML() {
+  const all = Object.values(state.movies); const want = all.filter(m => m.list === 'want').sort((a, b) => b.added - a.added); const seen = all.filter(m => m.list === 'seen').sort((a, b) => (b.watchedAt || 0) - (a.watchedAt || 0));
+  const P = state.pools || {};
+  const tabs = [['want', `Watchlist (${want.length})`], ['seen', `Watched (${seen.length})`], ['foryou', 'What should I watch'], ['upcoming', 'Upcoming']];
+  let body = '';
+  if (moviesTab === 'want') body = want.length ? `<div class="grid">${want.map(movieCard).join('')}</div>` : '<div class="empty">Your watchlist is empty. Search a movie above and hit “+ Want”.</div>';
+  else if (moviesTab === 'seen') body = seen.length ? `<div class="grid">${seen.map(movieCard).join('')}</div>` : '<div class="empty">No movies marked as watched yet.</div>';
+  else if (moviesTab === 'foryou') {
+    const sug = movieSuggestions(); const list = fill(sug, [P.movPop || [], P.movTop || []], excludeMov);
+    const avail = want.filter(m => m.providers && m.providers.stream.length && !(m.release > TODAY));
+    body = (avail.length ? `<h2>From your watchlist, streaming now</h2><div class="grid">${avail.slice(0, 6).map(movieCard).join('')}</div>` : '')
+      + (list.length ? `<h2 style="margin-top:14px">Suggested for you</h2><div class="grid six">${list.map(r => recCard(r, r.pad ? 'Popular right now' : 'Because you liked ' + r.from[0], '', 'movie')).join('')}</div>` : '<div class="empty">Add or mark a few movies and suggestions will appear here.</div>');
+  } else {
+    const mine = want.filter(m => m.release && m.release > TODAY).sort((a, b) => a.release.localeCompare(b.release));
+    const pool = (P.movUp || []).filter(r => !state.movies[r.id] && !state.dismissedM.includes(r.id) && r.release && r.release >= TODAY).sort((a, b) => a.release.localeCompare(b.release));
+    body = (mine.length ? `<h2>From your watchlist</h2><div class="grid">${mine.map(movieCard).join('')}</div>` : '')
+      + (pool.length ? `<h2 style="margin-top:14px">Coming to cinemas in ${regionName()}</h2><div class="grid six">${fill(pool, [], () => false).map(r => recCard(r, 'Releases ' + fmtDate(r.release), '', 'movie')).join('')}</div>` : '<div class="empty">Nothing upcoming found.</div>');
+  }
+  return `<div class="panel"><div class="tabs">${tabs.map(([k, l]) => `<button data-mtab="${k}" class="${k === moviesTab ? 'active' : ''}">${l}</button>`).join('')}</div>${body}</div>`;
+}
+function movieHTML() {
+  const m = state.movies[view.arg] || previewMovies[view.arg]; if (!m) return '<div class="panel empty">Loading movie…</div>';
+  if (m.error) return `<div class="panel empty">Could not load: ${esc(m.error)}</div>`;
+  const preview = !state.movies[view.arg];
+  const up = m.release && m.release > TODAY; const rel = m.localRelease && m.localRelease !== m.release ? m.localRelease : m.release;
+  return `<div class="panel">
+    <div class="detail-head">
+      ${m.poster ? `<img class="poster lg" src="${IMG}w342${m.poster}" alt="">` : '<div class="poster lg"></div>'}
+      <div class="grow" style="min-width:0">
+        <h2>${esc(m.name)} <span class="muted" style="font-weight:400">${m.year}</span></h2>
+        ${m.tagline ? `<div class="meta" style="font-style:italic">${esc(m.tagline)}</div>` : ''}
+        <div class="meta">${esc(m.genres)}${m.runtime ? ` · ${m.runtime} min` : ''}${m.cast && m.cast[0] && m.cast[0].role === 'Director' ? ` · dir. ${esc(m.cast.filter(c => c.role === 'Director').map(c => c.name).join(', '))}` : ''}</div>
+        <div class="meta" style="margin-top:4px">${ratingHTML(m.vote, m.votes, m.imdbRating)}</div>
+        ${providersHTML(m)}
+        <div class="meta" style="margin-top:4px">🎬 ${up ? `Releases ${fmtDate(rel, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}${m.localRelease && m.localRelease !== m.release ? ` in ${regionName()}` : ''} (${relDay(rel)})` : `Released ${m.release ? fmtDate(m.release, { day: 'numeric', month: 'long', year: 'numeric' }) : '—'}`}</div>
+        ${preview ? '' : `<div class="meta" style="margin-top:4px"><span class="badge ${m.list === 'seen' ? 'new' : ''}">${m.list === 'seen' ? 'Watched' + (m.watchedAt ? ' on ' + new Date(m.watchedAt).toLocaleDateString() : '') : 'On your watchlist'}</span></div>`}
+        <div class="actions">
+          ${preview ? `<button class="primary" data-mwant="${m.id}">+ Want to watch</button><button data-mseen="${m.id}">✓ Already seen</button>` : m.list === 'seen' ? `<button class="small" data-mlist="${m.id}|want">Move to watchlist</button>` : `<button class="small primary" data-mlist="${m.id}|seen">✓ Mark as watched</button>`}
+          ${preview ? '' : `<button class="small" id="mrefresh">↻ Refresh</button><button class="small ghost" data-mremove="${m.id}">Remove</button>`}
+          ${m.imdb ? `<a class="small muted" style="align-self:center;font-size:13px" href="https://www.imdb.com/title/${m.imdb}/" target="_blank" rel="noopener">IMDb ↗</a>` : ''}
+        </div>
+      </div>
+    </div>
+    <h2 style="margin-top:18px">Synopsis</h2><div>${esc(m.over) || '<span class="muted">No synopsis.</span>'}</div>
+  </div>
+  ${m.cast && m.cast.length ? `<div class="panel"><h2>Cast & crew</h2><div class="strip">${m.cast.map(c => `<div class="person" data-person="${c.id}" data-name="${esc(c.name)}">${c.photo ? `<img src="${IMG}w185${c.photo}" alt="">` : '<div class="ph"></div>'}<div class="pn">${esc(c.name)}</div><div class="pc">${esc(c.role)}</div></div>`).join('')}</div></div>` : ''}
+  ${movieRecsHTML(m)}`;
+}
+
+/* ============ my space ============ */
+function watchStats() {
+  let eps = 0, mins = 0; const perShow = [], genreMins = {}, months = {};
+  for (const s of Object.values(state.shows)) {
+    const w = state.watched[s.id] || {}; const avg = avgRuntime(s); let sm = 0, se = 0;
+    for (const ep of s.eps) { const ts = w[epKey(ep.s, ep.e)]; if (!ts) continue; const r = ep.runtime || avg; se++; sm += r; const mk = new Date(ts).toISOString().slice(0, 7); months[mk] = (months[mk] || 0) + 1; }
+    if (se) { perShow.push({ s, eps: se, mins: sm, done: progress(s).watched === progress(s).total && !s.inProd && /Ended|Canceled/.test(s.status) }); eps += se; mins += sm; (s.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + sm); }
+  }
+  const movies = Object.values(state.movies).filter(m => m.list === 'seen'); let mmins = 0;
+  for (const m of movies) { mmins += m.runtime || 110; (m.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + (m.runtime || 110)); if (m.watchedAt) { const mk = new Date(m.watchedAt).toISOString().slice(0, 7); months[mk] = (months[mk] || 0) + 1; } }
+  perShow.sort((a, b) => b.mins - a.mins);
+  return { eps, mins, perShow, movies: movies.length, mmins, genres: Object.entries(genreMins).sort((a, b) => b[1] - a[1]).slice(0, 8), months };
+}
+const fmtDur = mins => { const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), m = mins % 60; return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; };
+function spaceHTML() {
+  const st = watchStats(); const total = st.mins + st.mmins; const shows = Object.values(state.shows);
+  const completed = shows.filter(s => { const p = progress(s); return p.total && p.watched === p.total && /Ended|Canceled/.test(s.status); }).length;
+  const caught = shows.filter(s => !s.archived && !nextToWatch(s)).length;
+  const now = new Date(); const mk = []; for (let i = 11; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); mk.push([d.toISOString().slice(0, 7), d.toLocaleDateString(undefined, { month: 'short' })]); }
+  const maxM = Math.max(1, ...mk.map(([k]) => st.months[k] || 0)); const maxG = st.genres.length ? st.genres[0][1] : 1;
+  const nothing = !shows.length && !Object.keys(state.movies).length;
+  return `<div class="panel"><h2>My space</h2>
+    ${nothing ? '<div class="empty">Add shows and movies to see your stats.</div>' : `<div class="stats">
+      <div class="stat"><div class="big">${fmtDur(total)}</div><div class="lbl">total time watching${st.mmins ? ` · ${fmtDur(st.mins)} series, ${fmtDur(st.mmins)} movies` : ''}</div></div>
+      <div class="stat"><div class="big">${st.eps.toLocaleString()}</div><div class="lbl">episodes watched</div></div>
+      <div class="stat"><div class="big">${shows.length}</div><div class="lbl">shows tracked · ${completed} completed · ${caught} caught up</div></div>
+      <div class="stat"><div class="big">${st.movies}</div><div class="lbl">movies watched · ${Object.values(state.movies).filter(m => m.list === 'want').length} on watchlist</div></div>
+    </div>`}
+  </div>
+  ${st.perShow.length ? `<div class="panel"><h2>Key shows · by time spent</h2><div class="grid six">${st.perShow.slice(0, st.perShow.length >= 12 ? 12 : 6).map(({ s, eps, mins }) => `<div class="card" data-show="${s.id}">
+      ${s.poster ? `<img src="${IMG}w342${s.poster}" alt="" loading="lazy">` : '<div style="aspect-ratio:2/3;background:var(--panel-2)"></div>'}
+      <div class="body"><div class="name">${esc(s.name)}</div><div class="sub">${fmtDur(mins)} · ${eps} ep</div><div class="bar"><i style="width:${Math.round(100 * mins / st.perShow[0].mins)}%"></i></div></div></div>`).join('')}</div></div>` : ''}
+  ${st.genres.length ? `<div class="panel"><h2>Favourite genres · by time</h2>${st.genres.map(([g, m]) => `<div class="hbar"><span>${esc(g)}</span><div class="trk"><i style="width:${Math.round(100 * m / maxG)}%"></i></div><span class="val">${fmtDur(m)}</span></div>`).join('')}</div>` : ''}
+  ${st.eps || st.movies ? `<div class="panel"><h2>Activity · episodes & movies per month</h2><div class="cols">${mk.map(([k, l]) => `<div class="c" title="${st.months[k] || 0}"><i style="height:${Math.round(80 * (st.months[k] || 0) / maxM)}%"></i>${l}</div>`).join('')}</div>
+    <p class="help" style="margin:8px 0 0">Based on when you ticked episodes in the app; bulk-marked seasons count on the day you marked them.</p></div>` : ''}
+  ${st.perShow.length ? `<div class="panel"><h2>All shows · watch time</h2>${st.perShow.map(({ s, eps, mins }) => `<div class="hbar"><a href="#" data-show="${s.id}" style="color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.name)}</a><div class="trk"><i style="width:${Math.round(100 * mins / st.perShow[0].mins)}%"></i></div><span class="val">${fmtDur(mins)}</span></div>`).join('')}</div>` : ''}`;
+}
+function settingsHTML() {
+  const n = Object.keys(state.shows).length;
+  return `<div class="panel"><h2>Account</h2>
+    <div class="detail-head" style="align-items:center">${profile && profile.avatar_url ? `<img src="${esc(profile.avatar_url)}" alt="" style="width:56px;height:56px;border-radius:50%">` : ''}
+      <div class="grow"><div style="font-weight:600">${esc(profile ? profile.display_name || profile.username : '')}</div><div class="help">${esc(user ? user.email || '' : '')} · @${esc(profile ? profile.username : '')}</div></div>
+      <button class="small" id="signout">Sign out</button></div>
+    <div class="kv" style="margin-top:14px"><label>Username</label><div><input type="text" id="username" value="${esc(profile ? profile.username : '')}" maxlength="24" placeholder="3–24 letters, digits, _"><div class="help" style="margin-top:4px">Friends find you by username. Your profile link: <b>${location.origin}/#u/${esc(profile ? profile.username : '')}</b></div></div></div>
+    <div class="kv"><label>Display name</label><input type="text" id="displayName" value="${esc(profile ? profile.display_name || '' : '')}" maxlength="40"></div>
+    <div class="kv"><label>Profile visibility</label><div><label style="color:var(--text)"><input type="checkbox" id="isPublic" ${profile && profile.is_public ? 'checked' : ''}> Public — members can see my lists and follow me</label><div class="help" style="margin-top:4px">Private means nobody sees your lists, and friends' suggestions won't include you.</div></div></div>
+  </div>
+  <div class="panel"><h2>Settings</h2>
+    ${CFG.API ? '' : `<div class="kv"><label>TMDB API key</label><input type="password" id="key" value="${esc(state.apiKey)}" placeholder="API key or read access token"></div>
+    <div class="kv"><label>OMDb API key <span class="help">(optional, for IMDb ratings)</span></label><div><input type="password" id="omdb" value="${esc(state.omdbKey || '')}" placeholder="Free key from omdbapi.com/apikey.aspx"></div></div>`}
+    <div class="kv"><label>Streaming region</label><div><select id="region">${REGIONS.map(([c, n]) => `<option value="${c}" ${c === state.region ? 'selected' : ''}>${n}</option>`).join('')}</select><div class="help" style="margin-top:4px">Which country’s catalogue to use for “where to watch” (data from JustWatch via TMDB). Refresh all shows after changing it.</div></div></div>
+    <div class="kv"><label>Language</label><select id="lang">${['en-US', 'fr-FR', 'ar-TN', 'de-DE', 'es-ES', 'it-IT'].map(l => `<option ${l === state.lang ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="split"><button class="primary" id="saveSettings">Save</button><button id="refreshAll">↻ Refresh all shows now</button></div>
+    <p class="help">Shows are refreshed automatically when you open the app if their data is older than 20 hours.</p>
+  </div>
+  <div class="panel"><h2>Your data</h2>
+    <p class="help">${n} show${n === 1 ? '' : 's'} and ${Object.keys(state.movies).length} movies tracked, synced to your account and available on every device you sign in on.</p>
+    <div class="split"><button id="export">⬇ Export backup (JSON)</button><button id="import">⬆ Import a backup / old TVShowManiacs file</button><button id="ics2">📅 Export calendar (.ics)</button><button id="undismiss">Reset hidden suggestions${(state.dismissed.length + state.dismissedM.length) ? ` (${state.dismissed.length + state.dismissedM.length})` : ''}</button></div>
+    <div class="split" style="margin-top:10px"><button class="ghost" id="wipe">Delete all my lists</button><button class="ghost" id="deleteAccount" style="color:var(--warn)">Delete my account</button></div>
+    <input type="file" id="file" accept="application/json" hidden>
+  </div>
+  <div class="panel"><h2>Calendar reminders</h2>
+    <div class="help">The .ics file contains one event per upcoming episode (next 90 days): at the exact release/broadcast time in your timezone when it’s known (reminder at that moment), otherwise all-day with a reminder at 20:00. The platform is noted in the event. Import it into Google Calendar or Apple Calendar to get notifications. It’s a snapshot, so re-export when you add shows or every few weeks.</div>
+  </div>`;
+}
+
+/* ============ bindings ============ */
+function bindCommon() {
+  document.querySelectorAll('[data-show]').forEach(el => el.onclick = e => { e.preventDefault(); go('show', +el.dataset.show); });
+  document.querySelectorAll('[data-watch]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = b.dataset.watch.split('|').map(Number); setWatched(id, s, ep, true); render(); });
+  document.querySelectorAll('[data-toggle-ep]').forEach(b => b.onclick = () => { const [id, s, ep] = b.dataset.toggleEp.split('|').map(Number); setWatched(id, s, ep, !isWatched(id, s, ep)); render(); });
+  document.querySelectorAll('[data-season]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, sn, on] = b.dataset.season.split('|').map(Number); state.shows[id].eps.filter(ep => ep.s === sn && aired(ep)).forEach(ep => setWatched(id, ep.s, ep.e, !!on, true)); save(); render(); });
+  document.querySelectorAll('[data-allshow]').forEach(b => b.onclick = () => { const id = +b.dataset.allshow; if (!confirm('Mark every aired episode as watched?')) return; state.shows[id].eps.filter(aired).forEach(ep => setWatched(id, ep.s, ep.e, true, true)); save(); render(); });
+  document.querySelectorAll('#app [data-dismiss]').forEach(b => b.onclick = e => { e.stopPropagation(); state.dismissed = state.dismissed || []; state.dismissed.push(+b.dataset.dismiss); save(); render(); });
+  document.querySelectorAll('#app .card.rec [data-add], #app .card.rec [data-open], #app .person[data-person]').forEach(b => b.onclick = e => { e.stopPropagation();
+    if (b.dataset.add) addShow(+b.dataset.add); else if (b.dataset.open) go('show', +b.dataset.open); else go('person', { id: +b.dataset.person, name: b.dataset.name }); });
+  document.querySelectorAll('#app .card.rec [data-mwant], #app .card.rec [data-mseen], #app .card.rec [data-mopen], #app .card.rec [data-mdismiss]').forEach(b => b.onclick = e => { e.stopPropagation();
+    if (b.dataset.mwant) addMovie(+b.dataset.mwant, 'want'); else if (b.dataset.mseen) addMovie(+b.dataset.mseen, 'seen'); else if (b.dataset.mopen) go('movie', +b.dataset.mopen);
+    else { state.dismissedM.push(+b.dataset.mdismiss); save(); render(); } });
+  document.querySelectorAll('#app .card[data-mopen]').forEach(c => c.onclick = () => go('movie', +c.dataset.mopen));
+  document.querySelectorAll('#app .detail-head [data-add], #app .detail-head [data-mwant], #app .detail-head [data-mseen], #app .actions [data-add]').forEach(b => b.onclick = () => {
+    if (b.dataset.add) addShow(+b.dataset.add); else if (b.dataset.mwant) addMovie(+b.dataset.mwant, 'want'); else addMovie(+b.dataset.mseen, 'seen'); });
+  document.querySelectorAll('[data-mlist]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, l] = b.dataset.mlist.split('|'); setMovieList(+id, l); });
+  document.querySelectorAll('[data-mremove]').forEach(b => b.onclick = e => { e.stopPropagation(); const id = +b.dataset.mremove; if (!confirm(`Remove ${state.movies[id].name}?`)) return; delete state.movies[id]; save(); if (view.name === 'movie') go('movies'); else render(); });
+  bindFriendButtons();
+  document.querySelectorAll('[data-mtab]').forEach(b => b.onclick = () => { moviesTab = b.dataset.mtab; render(); });
+  document.querySelectorAll('[data-stab]').forEach(b => b.onclick = () => { showsTab = b.dataset.stab; render(); });
+  document.querySelectorAll('[data-ep], [data-epnav]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = (b.dataset.ep || b.dataset.epnav).split('|').map(Number); go('episode', { id, s, e: ep }); });
+  if ($('#mrefresh')) $('#mrefresh').onclick = async () => { try { const m = await fetchMovie(view.arg); state.movies[view.arg] = m; save(); toast('Refreshed'); render(); } catch (e) { toast('Refresh failed: ' + e.message); } };
+  document.querySelectorAll('[data-toggle]').forEach(h => h.onclick = () => { const box = $('#season-' + h.dataset.toggle); box.hidden = !box.hidden; h.querySelector('span:last-child').textContent = box.hidden ? '▸' : '▾'; });
+  const s = state.shows[view.arg];
+  if (view.name === 'show' && s) {
+    $('#refresh').onclick = async () => { await refreshShow(s.id); render(); };
+    $('#archive').onclick = () => { s.archived = !s.archived; save(); render(); };
+    $('#remove').onclick = () => { if (!confirm(`Remove ${s.name} and its watch history?`)) return; delete state.shows[s.id]; delete state.watched[s.id]; state.order = state.order.filter(x => x !== s.id); save(); go('shows'); };
+  }
+  if ($('#ics')) $('#ics').onclick = exportICS;
+  if (view.name === 'settings') {
+    $('#saveSettings').onclick = async () => {
+      if ($('#key')) { state.apiKey = $('#key').value.trim(); state.omdbKey = $('#omdb').value.trim(); }
+      state.lang = $('#lang').value; state.region = $('#region').value;
+      const patch = { username: $('#username').value.trim().toLowerCase(), display_name: $('#displayName').value.trim(), is_public: $('#isPublic').checked };
+      if (!/^[a-z0-9_]{3,24}$/.test(patch.username)) return toast('Username: 3–24 lowercase letters, digits or _');
+      save();
+      if (!profile) { profile = await createProfile(user); if (!profile) return; }
+      const { data, error } = await sb.from('profiles').update(patch).eq('id', user.id).select().maybeSingle();
+      if (error || !data) return toast(error && /unique|duplicate/i.test(error.message) ? 'That username is taken' : 'Could not save profile: ' + (error ? error.message : 'no profile row — run schema.sql in Supabase'));
+      profile = data; toast('Saved'); render(); };
+    $('#signout').onclick = async () => { await sb.auth.signOut(); location.reload(); };
+    $('#deleteAccount').onclick = async () => { if (!confirm('Delete your account and everything in it? This cannot be undone.')) return; if (!confirm('Really delete? Export a backup first if you want to keep your lists.')) return;
+      const { error } = await sb.rpc('delete_my_account'); if (error) return toast('Could not delete: ' + error.message); localStorage.removeItem(KEY); await sb.auth.signOut(); location.reload(); };
+    $('#refreshAll').onclick = () => refreshAll(true);
+    $('#export').onclick = () => download(`tvshowmaniacs-backup-${TODAY}.json`, JSON.stringify(state, null, 1), 'application/json');
+    $('#ics2').onclick = exportICS;
+    $('#undismiss').onclick = () => { state.dismissed = []; state.dismissedM = []; save(); toast('Hidden suggestions will show again'); render(); };
+    $('#import').onclick = () => $('#file').click();
+    $('#file').onchange = ev => { const f = ev.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const d = JSON.parse(r.result); if (!d.shows) throw 0; mergeImport(d); save(); toast('Imported — syncing to your account'); go('home'); } catch (e) { toast('Not a valid backup file'); } }; r.readAsText(f); };
+    $('#wipe').onclick = () => { if (confirm('Delete all your shows, movies and progress from your account?')) { const keep = { apiKey: state.apiKey, omdbKey: state.omdbKey, lang: state.lang, region: state.region }; state = Object.assign(blank(), keep); save(); render(); } };
+  }
+}
+function setWatched(id, s, e, on, skipSave) {
+  state.watched[id] = state.watched[id] || {};
+  if (on) state.watched[id][epKey(s, e)] = Date.now(); else delete state.watched[id][epKey(s, e)];
+  if (!skipSave) save();
+}
+function download(name, text, type) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+function exportICS() {
+  const end = addDays(90); const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//TVShowManiacs//EN', 'CALSCALE:GREGORIAN', 'X-WR-CALNAME:TVShowManiacs episodes'];
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  let n = 0;
+  for (const s of Object.values(state.shows)) { if (s.archived) continue;
+    for (const ep of s.eps) { if (!ep.air || ep.air < TODAY || ep.air > end) continue; n++;
+      const d = ep.air.replace(/-/g, ''); const dn = addDays(Math.round((new Date(ep.air + 'T12:00:00') - new Date(TODAY + 'T12:00:00')) / 86400000) + 1).replace(/-/g, '');
+      const t = `${s.name} ${code(ep.s, ep.e)}${ep.name ? ' – ' + ep.name : ''}`.replace(/[\\;,]/g, m => '\\' + m);
+      const where = s.providers && s.providers.stream.length ? ' (' + s.providers.stream.map(x => x.name).join(', ') + ')' : (s.network ? ' (' + s.network + ')' : '');
+      const desc = (where.trim() + ' ' + (ep.over || '')).trim().replace(/\r?\n/g, ' ').replace(/[\\;,]/g, m => '\\' + m);
+      let when;
+      if (ep.at && !isNaN(new Date(ep.at))) { const u = new Date(ep.at); const z = u.toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z'; const e2 = new Date(u.getTime() + (ep.runtime || 60) * 60000).toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+        when = [`DTSTART:${z}`, `DTEND:${e2}`, 'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${t}`, 'TRIGGER:PT0M', 'END:VALARM']; }
+      else when = [`DTSTART;VALUE=DATE:${d}`, `DTEND;VALUE=DATE:${dn}`, 'BEGIN:VALARM', 'ACTION:DISPLAY', `DESCRIPTION:${t}`, 'TRIGGER;VALUE=DURATION:PT20H', 'END:VALARM'];
+      lines.push('BEGIN:VEVENT', `UID:tvsm-${s.id}-${ep.s}-${ep.e}@tvshowmaniacs`, `DTSTAMP:${stamp}`, ...when, `SUMMARY:${t}`, `DESCRIPTION:${desc}`, 'END:VEVENT');
+    } }
+  lines.push('END:VCALENDAR');
+  if (!n) return toast('No upcoming episodes in the next 90 days');
+  download(`tvshowmaniacs-${TODAY}.ics`, lines.join('\r\n'), 'text/calendar');
+  toast(`Exported ${n} upcoming episode${n > 1 ? 's' : ''}`);
+}
+
+/* ============ friends ============ */
+let friendsData = { following: [], followers: [], watching: [], watchingM: [], activity: [], results: [] }, homeFriends = null;
+const avatar = (p, size) => p.avatar_url ? `<img src="${esc(p.avatar_url)}" alt="" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover">` : `<div style="width:${size}px;height:${size}px;border-radius:50%;background:var(--panel-2);display:grid;place-items:center;font-weight:700;color:var(--accent)">${esc((p.username || '?')[0].toUpperCase())}</div>`;
+function memberRow(p, right) {
+  return `<div class="row">${avatar(p, 40)}<div class="grow"><div class="title"><a href="#" data-member="${esc(p.username)}" style="color:inherit;text-decoration:none">${esc(p.display_name || p.username)}</a></div><div class="sub">@${esc(p.username)}${p.is_public ? '' : ' · private'}</div></div>${right || ''}</div>`;
+}
+const followBtn = p => friendsData.following.some(f => f.id === p.id) ? `<button class="small" data-unfollow="${p.id}">Following ✓</button>` : `<button class="small primary" data-follow="${p.id}">Follow</button>`;
+function friendCard(r, kind) {
+  const who = r.friends.length === 1 ? r.friends[0] : r.friends.length === 2 ? r.friends.join(' & ') : `${r.friends[0]} + ${r.friends.length - 1} others`;
+  return recCard({ id: r.item_id, name: r.name, poster: r.poster, year: r.year || '', vote: r.vote || 0, over: '', genreIds: [] }, (kind === 'tv' ? 'Watched by ' : 'Seen by ') + who, '', kind);
+}
+function friendsHTML() {
+  if (!sb) return '<div class="panel empty">Friends need an account — this copy runs without a backend.</div>';
+  const F = friendsData;
+  return `<div class="panel"><h2>Find members</h2>
+    <div class="search" style="margin:0"><input type="text" id="memberQ" placeholder="Search by username or name…" autocomplete="off"><button id="memberGo">Search</button></div>
+    <div id="memberResults">${F.results.map(p => memberRow(p, p.id === user.id ? '<span class="badge">you</span>' : followBtn(p))).join('')}</div>
+    <p class="help" style="margin:10px 0 0">Share your profile link so friends can follow you: <b>${location.origin}/#u/${esc(profile ? profile.username : '')}</b></p></div>
+  ${gridSec('Friends are watching', F.watching.filter(r => r.poster && !state.shows[r.item_id]).slice(0, 12), r => friendCard(r, 'tv'))}
+  ${gridSec('Friends have seen', F.watchingM.filter(r => r.poster && !state.movies[r.item_id]).slice(0, 12), r => friendCard(r, 'movie'))}
+  <div class="panel"><h2>Activity</h2>${F.activity.length ? F.activity.slice(0, 40).map(a => `<div class="row">${avatar(a, 32)}<div class="grow"><div class="sub" style="white-space:normal"><a href="#" data-member="${esc(a.username)}" style="color:var(--text);text-decoration:none;font-weight:600">${esc(a.display_name || a.username)}</a> ${a.kind === 'episode' ? `watched <a href="#" data-show="${a.item_id}" style="color:var(--text)">${esc(a.name)}</a> ${code(a.season, a.episode)}` : `saw <a href="#" data-mopen="${a.item_id}" style="color:var(--text)">${esc(a.name)}</a>`}</div></div><span class="help">${relDay(String(a.at).slice(0, 10))}</span></div>`).join('') : '<div class="empty">Follow a few people and their activity shows up here.</div>'}</div>
+  <div class="panel"><h2>Following (${F.following.length})</h2>${F.following.length ? F.following.map(p => memberRow(p, followBtn(p))).join('') : '<div class="empty">You don’t follow anyone yet.</div>'}</div>
+  <div class="panel"><h2>Followers (${F.followers.length})</h2>${F.followers.length ? F.followers.map(p => memberRow(p, p.id === user.id ? '' : followBtn(p))).join('') : '<div class="empty">Nobody yet — share your link!</div>'}</div>`;
+}
+async function loadFriends() {
+  if (!sb) return; friendsData.loaded = true;
+  const [fo, fr, w, wm, act] = await Promise.all([
+    sb.from('follows').select('followee:profiles!follows_followee_id_fkey(id,username,display_name,avatar_url,is_public)').eq('follower_id', user.id),
+    sb.from('follows').select('follower:profiles!follows_follower_id_fkey(id,username,display_name,avatar_url,is_public)').eq('followee_id', user.id),
+    sb.rpc('friends_watching', { kind: 'tv' }), sb.rpc('friends_watching', { kind: 'movie' }), sb.rpc('friends_activity')]);
+  friendsData.following = (fo.data || []).map(r => r.followee).filter(Boolean); friendsData.followers = (fr.data || []).map(r => r.follower).filter(Boolean);
+  friendsData.watching = w.data || []; friendsData.watchingM = wm.data || []; friendsData.activity = act.data || [];
+  if (view.name === 'friends') { const q = $('#memberQ') ? $('#memberQ').value : ''; render(); if (q) $('#memberQ').value = q; }
+}
+async function searchMembers(q) {
+  q = q.trim().toLowerCase(); if (q.length < 2) return;
+  const { data } = await sb.from('profiles').select('id,username,display_name,avatar_url,is_public').or(`username.ilike.%${q}%,display_name.ilike.%${q}%`).limit(12);
+  friendsData.results = data || []; const box = $('#memberResults'); if (box) { box.innerHTML = friendsData.results.length ? friendsData.results.map(p => memberRow(p, p.id === user.id ? '<span class="badge">you</span>' : followBtn(p))).join('') : '<div class="empty">No member found.</div>'; bindFriendButtons(); }
+}
+async function follow(id, on) {
+  const r = on ? await sb.from('follows').insert({ follower_id: user.id, followee_id: id }) : await sb.from('follows').delete().match({ follower_id: user.id, followee_id: id });
+  if (r.error) return toast(r.error.message);
+  homeFriends = null; await loadFriends(); if (view.name === 'member') { memberData = null; loadMember(); } else if (view.name !== 'friends') render();
+}
+function bindFriendButtons() {
+  document.querySelectorAll('[data-follow]').forEach(b => b.onclick = e => { e.stopPropagation(); follow(b.dataset.follow, true); });
+  document.querySelectorAll('[data-unfollow]').forEach(b => b.onclick = e => { e.stopPropagation(); follow(b.dataset.unfollow, false); });
+  document.querySelectorAll('[data-member]').forEach(b => b.onclick = e => { e.preventDefault(); e.stopPropagation(); go('member', b.dataset.member); });
+  if ($('#memberQ')) { let t; $('#memberQ').oninput = () => { clearTimeout(t); t = setTimeout(() => searchMembers($('#memberQ').value), 350); }; $('#memberGo').onclick = () => searchMembers($('#memberQ').value); }
+}
+// member profile page
+let memberData = null;
+function memberHTML() {
+  const m = memberData && memberData.username === view.arg && !memberData.loading ? memberData : null;
+  if (!m) return `<div class="panel empty">Loading @${esc(view.arg)}…</div>`;
+  if (m.missing) return `<div class="panel empty">No member called @${esc(view.arg)}.</div>`;
+  const p = m.profile, st = m.stats || {};
+  const card = (r, kind) => recCard({ id: kind === 'tv' ? r.show_id : r.movie_id, name: r.data.name, poster: r.data.poster, year: r.data.year || '', vote: r.data.vote || 0, over: '', genreIds: [] }, kind === 'tv' ? `${r.watched || 0}/${r.total || '?'} episodes` : (r.list === 'seen' ? 'Seen' : 'Wants to watch'), '', kind);
+  return `<div class="panel"><div class="detail-head" style="align-items:center">${avatar(p, 72)}
+      <div class="grow"><h2>${esc(p.display_name || p.username)}</h2><div class="meta">@${esc(p.username)}${p.is_public ? '' : ' · private profile'}</div>
+      <div class="meta" style="margin-top:6px">${st.episodes || 0} episodes · ${st.shows || 0} shows · ${st.movies || 0} movies · ${st.followers || 0} followers · ${st.following || 0} following</div></div>
+      ${p.id === user.id ? '<span class="badge">you</span>' : followBtn(p)}</div></div>
+    ${!p.is_public && p.id !== user.id ? '<div class="panel empty">This profile is private.</div>' : gridSec('Watching', m.shows.filter(r => r.data.poster && !r.archived), r => card(r, 'tv')) + gridSec('Movies', m.movies.filter(r => r.data.poster), r => card(r, 'movie'))}`;
+}
+async function loadMember() {
+  const uname = view.arg; memberData = { username: uname, loading: true }; const { data: p } = await sb.from('profiles').select('id,username,display_name,avatar_url,is_public').eq('username', uname).maybeSingle();
+  if (!p) { memberData = { username: uname, missing: true }; if (view.name === 'member') render(); return; }
+  const [shows, watched, movies, stats] = await Promise.all([
+    sb.from('user_shows').select('show_id,data,archived').eq('user_id', p.id).order('added_at', { ascending: false }),
+    sb.from('watched_episodes').select('show_id').eq('user_id', p.id), sb.from('user_movies').select('movie_id,data,list').eq('user_id', p.id).order('added_at', { ascending: false }), sb.rpc('profile_stats', { uid: p.id })]);
+  const wc = {}; (watched.data || []).forEach(r => wc[r.show_id] = (wc[r.show_id] || 0) + 1);
+  const slimRow = r => ({ show_id: r.show_id, archived: r.archived, data: { name: r.data.name, poster: r.data.poster, year: r.data.year, vote: r.data.vote }, watched: wc[r.show_id] || 0, total: (r.data.eps || []).filter(e => e.air && e.air <= TODAY).length });
+  memberData = { username: uname, profile: p, shows: (shows.data || []).map(slimRow), movies: (movies.data || []).map(r => ({ movie_id: r.movie_id, list: r.list, data: { name: r.data.name, poster: r.data.poster, year: r.data.year, vote: r.data.vote } })), stats: stats.data && stats.data[0] };
+  if (!friendsData.following.length) await loadFriends();
+  if (view.name === 'member' && view.arg === uname) { navigated = true; render(); }
+}
+async function loadFriendsHome() {
+  if (!sb || homeFriends) return;
+  const { data } = await sb.rpc('friends_watching', { kind: 'tv' }); homeFriends = data || [];
+  if (homeFriends.length && view.name === 'home') render();
+}
+
+/* ============ import of old local data ============ */
+function mergeImport(d) {
+  normalize(d);
+  for (const id in d.shows) { if (!state.shows[id]) { state.shows[id] = d.shows[id]; if (!state.order.includes(+id)) state.order.push(+id); }
+    state.watched[id] = Object.assign({}, d.watched && d.watched[id] || {}, state.watched[id] || {}); }
+  for (const id in d.movies) if (!state.movies[id]) state.movies[id] = d.movies[id];
+  state.dismissed = [...new Set([...state.dismissed, ...(d.dismissed || [])])]; state.dismissedM = [...new Set([...state.dismissedM, ...(d.dismissedM || [])])];
+}
+
+/* ============ auth + sync (Supabase) ============ */
+const sb = (CFG.SUPABASE_URL && window.supabase) ? window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON) : null;
+function loginHTML() {
+  return `<div class="panel setup">
+    <h2>TVShowManiacs</h2>
+    <p class="muted" style="max-width:520px;margin:0 auto 18px">Track the series and movies you watch, know exactly when the next episode drops and where to stream it, and see what your friends are watching.</p>
+    ${sb ? `<button class="primary" id="googleLogin" style="padding:10px 18px">Continue with Google</button>
+    <div class="help" style="margin:14px 0 6px">or get a sign-in link by e-mail</div>
+    <div class="split" style="justify-content:center"><input type="text" id="emailLogin" placeholder="you@example.com" style="max-width:280px" autocomplete="email"><button id="emailGo">Send link</button></div>
+    <div id="loginMsg" class="help" style="margin-top:10px"></div>`
+    : `<div class="help">Sign-in is not configured yet (SUPABASE_URL missing in config.js).</div>`}
+    <p class="help" style="margin-top:22px">Free, no ads. <a href="/privacy.html">Privacy &amp; credits</a></p>
+  </div>`;
+}
+function bindLogin() {
+  if (!sb) return;
+  $('#googleLogin').onclick = async () => { const { error } = await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: location.origin + '/' } }); if (error) $('#loginMsg').textContent = error.message; };
+  $('#emailGo').onclick = async () => { const email = $('#emailLogin').value.trim(); if (!email) return; const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + '/' } }); $('#loginMsg').textContent = error ? error.message : 'Check your inbox for the sign-in link.'; };
+  $('#emailLogin').onkeydown = e => { if (e.key === 'Enter') $('#emailGo').click(); };
+}
+async function onSignedIn(u) {
+  user = u; KEY = 'tvsm.cache.' + u.id;
+  state = loadLocal(KEY) || blank();
+  let { data: p } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
+  if (!p) p = await createProfile(u);
+  profile = p || null;
+  try { await loadFromDb(); } catch (e) { toast('Could not load your data: ' + e.message); }
+  // one-time import of data saved by the old single-file version in this browser
+  const legacy = loadLocal(LEGACY_KEY);
+  if (legacy && Object.keys(legacy.shows).length + Object.keys(legacy.movies || {}).length && !Object.keys(state.shows).length && !Object.keys(state.movies).length) {
+    if (confirm(`Import the ${Object.keys(legacy.shows).length} shows and ${Object.keys(legacy.movies || {}).length} movies saved in this browser into your account?`)) { mergeImport(legacy); save(); }
+    localStorage.removeItem(LEGACY_KEY);
+  }
+  navigated = true; render(); refreshAll(false);
+}
+// Normally the database trigger creates the profile at sign-up; this covers users who signed up before it existed.
+async function createProfile(u) {
+  let base = (u.email || 'user').split('@')[0].toLowerCase().replace(/[^a-z0-9_]/g, '').slice(0, 20); if (base.length < 3) base = 'user' + base;
+  for (let i = 0; i < 5; i++) {
+    const username = i ? base + '_' + Math.random().toString(36).slice(2, 6) : base;
+    const { data, error } = await sb.from('profiles').insert({ id: u.id, username, display_name: (u.user_metadata && (u.user_metadata.full_name || u.user_metadata.name)) || base, avatar_url: u.user_metadata && u.user_metadata.avatar_url || null }).select().single();
+    if (data) return data;
+    if (!/duplicate|unique/i.test(error.message)) { toast('Could not create your profile: ' + error.message + ' — did you run schema.sql?'); return null; }
+  }
+  return null;
+}
+async function loadFromDb() {
+  if (profile) { state.region = profile.region || state.region; state.lang = profile.lang || state.lang; state.dismissed = profile.dismissed || []; state.dismissedM = profile.dismissed_m || []; }
+  const [shows, watched, movies] = await Promise.all([
+    sb.from('user_shows').select('show_id,data,archived,added_at').eq('user_id', user.id).order('added_at'),
+    sb.from('watched_episodes').select('show_id,season,episode,watched_at').eq('user_id', user.id),
+    sb.from('user_movies').select('movie_id,data,list,watched_at,added_at').eq('user_id', user.id)]);
+  for (const r of [shows, watched, movies]) if (r.error) throw r.error;
+  state.shows = {}; state.order = []; state.watched = {}; state.movies = {};
+  for (const r of shows.data) { const d = r.data; d.id = r.show_id; d.archived = r.archived; d.added = new Date(r.added_at).getTime(); state.shows[r.show_id] = d; state.order.push(r.show_id); state.watched[r.show_id] = {}; }
+  for (const r of watched.data) { (state.watched[r.show_id] = state.watched[r.show_id] || {})[epKey(r.season, r.episode)] = new Date(r.watched_at).getTime(); }
+  for (const r of movies.data) { const d = r.data; d.id = r.movie_id; d.list = r.list; d.watchedAt = r.watched_at ? new Date(r.watched_at).getTime() : null; d.added = new Date(r.added_at).getTime(); state.movies[r.movie_id] = d; }
+  synced = snapshot();
+}
+// Sync = diff the current state against the last synced snapshot and write only what changed.
+let synced = null, syncTimer = null, syncing = false, syncAgain = false;
+const strip = (o, keys) => { const c = { ...o }; keys.forEach(k => delete c[k]); return c; };
+function snapshot() {
+  const shows = {}; for (const id in state.shows) shows[id] = JSON.stringify(strip(state.shows[id], ['archived', 'added', 'fetched'])) + '|' + (state.shows[id].archived ? 1 : 0);
+  const watched = {}; for (const id in state.watched) for (const k in state.watched[id]) watched[id + ':' + k] = state.watched[id][k];
+  const movies = {}; for (const id in state.movies) movies[id] = JSON.stringify(strip(state.movies[id], ['list', 'watchedAt', 'added', 'fetched'])) + '|' + state.movies[id].list + '|' + (state.movies[id].watchedAt || '');
+  const prof = JSON.stringify([state.region, state.lang, state.dismissed, state.dismissedM]);
+  return { shows, watched, movies, prof };
+}
+function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(runSync, 500); }
+async function runSync() {
+  if (!user || !sb) return;
+  if (syncing) { syncAgain = true; return; }
+  syncing = true; setSyncState('Saving…');
+  try {
+    const now = snapshot(); const old = synced || { shows: {}, watched: {}, movies: {}, prof: '' };
+    const ops = [];
+    const upShows = Object.keys(now.shows).filter(id => now.shows[id] !== old.shows[id]).map(id => ({ user_id: user.id, show_id: +id, data: strip(state.shows[id], ['archived', 'added']), archived: !!state.shows[id].archived, added_at: new Date(state.shows[id].added || Date.now()).toISOString() }));
+    const delShows = Object.keys(old.shows).filter(id => !(id in now.shows)).map(Number);
+    if (upShows.length) ops.push(sb.from('user_shows').upsert(upShows));
+    if (delShows.length) ops.push(sb.from('user_shows').delete().eq('user_id', user.id).in('show_id', delShows));
+    const upW = Object.keys(now.watched).filter(k => now.watched[k] !== old.watched[k]).map(k => { const [id, s, e] = k.split(/[:-]/).map(Number); return { user_id: user.id, show_id: id, season: s, episode: e, watched_at: new Date(now.watched[k]).toISOString() }; });
+    const delW = Object.keys(old.watched).filter(k => !(k in now.watched)).map(k => k.split(/[:-]/).map(Number));
+    if (upW.length) ops.push(sb.from('watched_episodes').upsert(upW));
+    for (const [id, s, e] of delW) ops.push(sb.from('watched_episodes').delete().match({ user_id: user.id, show_id: id, season: s, episode: e }));
+    const upM = Object.keys(now.movies).filter(id => now.movies[id] !== old.movies[id]).map(id => ({ user_id: user.id, movie_id: +id, data: strip(state.movies[id], ['list', 'watchedAt', 'added']), list: state.movies[id].list, watched_at: state.movies[id].watchedAt ? new Date(state.movies[id].watchedAt).toISOString() : null, added_at: new Date(state.movies[id].added || Date.now()).toISOString() }));
+    const delM = Object.keys(old.movies).filter(id => !(id in now.movies)).map(Number);
+    if (upM.length) ops.push(sb.from('user_movies').upsert(upM));
+    if (delM.length) ops.push(sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM));
+    if (now.prof !== old.prof) ops.push(sb.from('profiles').update({ region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM }).eq('id', user.id));
+    const results = await Promise.all(ops);
+    const err = results.find(r => r && r.error);
+    if (err) throw err.error;
+    synced = now; setSyncState('');
+  } catch (e) { setSyncState('⚠ Not saved: ' + (e.message || e)); console.error('sync', e); setTimeout(scheduleSync, 15000); }
+  finally { syncing = false; if (syncAgain) { syncAgain = false; scheduleSync(); } }
+}
+function setSyncState(t) { const el = $('#syncState'); if (el) el.textContent = t ? t + ' · ' : ''; }
+window.addEventListener('beforeunload', () => { if (syncTimer) runSync(); });
+
+/* ============ boot ============ */
+if (sb) {
+  const routeHash = () => { const h = location.hash.match(/^#u\/([a-z0-9_]+)/i); if (h) { view = { name: 'member', arg: h[1].toLowerCase() }; history.replaceState(null, '', '/'); if (user) { navigated = true; render(); } } };
+  routeHash(); window.addEventListener('hashchange', routeHash);
+  render();
+  sb.auth.getSession().then(({ data }) => { if (data.session) onSignedIn(data.session.user); });
+  sb.auth.onAuthStateChange((ev, session) => { if (ev === 'SIGNED_IN' && session && !user) onSignedIn(session.user); if (ev === 'SIGNED_OUT') { user = null; render(); } });
+} else { // no backend configured: single-user mode with a personal TMDB key, data in this browser only
+  user = { id: 'local' }; state = loadLocal(LEGACY_KEY) || blank(); render(); if (state.apiKey) refreshAll(false);
+}
+if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(() => {});
+</script>
+</body>
+</html>
