@@ -35,6 +35,9 @@ end $$;
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created after insert on auth.users for each row execute procedure public.handle_new_user();
 
+-- streaming services the user pays for (provider names as TMDB spells them)
+alter table public.profiles add column if not exists subscriptions jsonb not null default '[]';
+
 -- ---------------------------------------------------------------- lists
 create table if not exists public.user_shows (
   user_id     uuid not null references public.profiles(id) on delete cascade,

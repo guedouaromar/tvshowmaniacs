@@ -172,7 +172,7 @@ const IMG = 'https://image.tmdb.org/t/p/';
 let KEY = LEGACY_KEY;                 // becomes tvsm.cache.<user id> after sign-in
 let user = null, profile = null;     // Supabase auth user + our profiles row
 let state = blank();
-function blank() { return { apiKey: '', omdbKey: '', lang: 'en-US', region: 'FR', shows: {}, watched: {}, order: [], trend: null, movies: {}, pools: null, dismissed: [], dismissedM: [] }; }
+function blank() { return { apiKey: '', omdbKey: '', lang: 'en-US', region: 'FR', shows: {}, watched: {}, order: [], trend: null, movies: {}, pools: null, dismissed: [], dismissedM: [], subs: [], provList: null }; }
 function normalize(s) { const b = blank(); for (const k in b) if (s[k] === undefined) s[k] = b[k]; return s; }
 function loadLocal(key) { try { const s = JSON.parse(localStorage.getItem(key)); if (s && s.shows) return normalize(s); } catch (e) {} return null; }
 function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} if (user) scheduleSync(); }
@@ -210,9 +210,26 @@ function airsLine(s) {
   const local = nxt && nxt.at ? ` · next one available ${fmtDate(nxt.air)} at ${localTime(nxt.at)} your time` : '';
   return parts.length || local ? `<div class="meta" style="margin-top:4px">🕘 ${parts.join(' ')}${local}</div>` : '';
 }
+const haveSub = name => (state.subs || []).some(sname => sname.toLowerCase() === (name || '').toLowerCase());
+const onMyServices = item => !!(item && item.providers && item.providers.stream.some(x => haveSub(x.name)));
+function subsHTML() {
+  const list = state.provList && state.provList.region === state.region ? state.provList.list : null;
+  if (!list) { loadProviderList(); return '<span class="help">Loading services for ' + esc(regionName()) + '…</span>'; }
+  return list.map(pv => `<label class="badge" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:5px 10px;${haveSub(pv.name) ? 'border-color:var(--ok);color:var(--text)' : ''}"><input type="checkbox" value="${esc(pv.name)}" ${haveSub(pv.name) ? 'checked' : ''} style="margin:0">${pv.logo ? `<img src="${IMG}w45${pv.logo}" alt="" style="width:16px;height:16px;border-radius:3px">` : ''}${esc(pv.name)}</label>`).join('');
+}
+async function loadProviderList() {
+  if (loadProviderList.busy) return; loadProviderList.busy = true;
+  try { const d = await tmdb('/watch/providers/tv', { watch_region: state.region });
+    const list = (d.results || []).filter(x => x.display_priorities && x.display_priorities[state.region] !== undefined).sort((a, b) => a.display_priorities[state.region] - b.display_priorities[state.region]).slice(0, 30).map(x => ({ name: x.provider_name, logo: x.logo_path }));
+    // keep any subscription the user already ticked even if it isn't in the top 30
+    (state.subs || []).forEach(n => { if (!list.some(x => x.name === n)) list.push({ name: n, logo: null }); });
+    state.provList = { region: state.region, list }; save(); if (view.name === 'settings' && $('#subsBox')) $('#subsBox').innerHTML = subsHTML(); }
+  catch (e) { if ($('#subsBox')) $('#subsBox').innerHTML = '<span class="help">Could not load the list of services: ' + esc(e.message) + '</span>'; }
+  finally { loadProviderList.busy = false; }
+}
 function providersHTML(s) {
   const p = s.providers; if (!p) return '';
-  const chip = x => `<span class="badge" style="display:inline-flex;align-items:center;gap:5px;color:var(--text)">${x.logo ? `<img src="${IMG}w45${x.logo}" alt="" style="width:16px;height:16px;border-radius:3px">` : ''}${esc(x.name)}</span>`;
+  const chip = x => `<span class="badge" style="display:inline-flex;align-items:center;gap:5px;color:var(--text);${haveSub(x.name) ? 'border-color:var(--ok);background:rgba(61,220,132,.12)' : ''}" title="${haveSub(x.name) ? 'You subscribe to this' : ''}">${x.logo ? `<img src="${IMG}w45${x.logo}" alt="" style="width:16px;height:16px;border-radius:3px">` : ''}${esc(x.name)}${haveSub(x.name) ? ' ✓' : ''}</span>`;
   if (!p.stream.length && !p.rent.length) return `<div class="meta" style="margin-top:6px">📺 No streaming platform listed for ${regionName(p.region)}${s.network ? ` · broadcast on ${esc(s.network)}` : ''}</div>`;
   return `<div class="meta" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px;align-items:center">📺 ${p.stream.length ? `Stream on ${p.stream.map(chip).join(' ')}` : ''}${p.rent.length ? `<span class="help">${p.stream.length ? ' · ' : ''}Rent/buy: ${p.rent.slice(0, 3).map(x => esc(x.name)).join(', ')}</span>` : ''}
     <span class="help">(${regionName(p.region)})</span></div>`;
@@ -310,13 +327,19 @@ async function fetchShow(id) {
     eps, fetched: Date.now(), added: state.shows[id] ? state.shows[id].added : Date.now(), archived: state.shows[id] ? !!state.shows[id].archived : false,
   };
 }
-async function addShow(id) {
+async function addShow(id, quiet) {
   toast('Loading show…');
   try {
     const show = previewShows[id] && !previewShows[id].error ? previewShows[id] : await fetchShow(id); delete previewShows[id];
     state.shows[id] = show; if (!state.order.includes(id)) state.order.push(id); state.watched[id] = state.watched[id] || {};
-    save(); toast(`Added ${show.name}`); render();
-  } catch (e) { toast('Error: ' + e.message); }
+    save(); toast(`Added ${show.name}`); if (!quiet) render(); return true;
+  } catch (e) { toast('Error: ' + e.message); return false; }
+}
+// a show opened before being added: adopt the already-loaded preview data without a network call
+function ensureTracked(id) {
+  if (state.shows[id]) return true;
+  const pv = previewShows[id]; if (!pv || pv.error) return false;
+  state.shows[id] = pv; delete previewShows[id]; if (!state.order.includes(id)) state.order.push(id); state.watched[id] = state.watched[id] || {}; toast(`Added ${pv.name} to your shows`); return true;
 }
 /* ============ movies ============ */
 const slimM = r => ({ id: r.id, name: r.title || r.name, poster: r.poster_path || null, year: (r.release_date || '').slice(0, 4), release: r.release_date || null, vote: r.vote_average || 0, votes: r.vote_count || 0, pop: r.popularity || 0, over: (r.overview || '').slice(0, 160), genreIds: r.genre_ids || [] });
@@ -340,10 +363,10 @@ async function fetchMovie(id) {
     cast: [...crew, ...cast].slice(0, 12), recs: recs.slice(0, 20), fetched: Date.now(),
     list: old.list || 'want', added: old.added || Date.now(), watchedAt: old.watchedAt || null };
 }
-async function addMovie(id, list) {
+async function addMovie(id, list, quiet) {
   toast('Loading movie…');
-  try { const m = previewMovies[id] && !previewMovies[id].error ? previewMovies[id] : await fetchMovie(id); delete previewMovies[id]; m.list = list; if (list === 'seen') m.watchedAt = m.watchedAt || Date.now(); state.movies[id] = m; save(); toast(list === 'seen' ? `Marked ${m.name} as watched` : `${m.name} added to your watchlist`); render(); }
-  catch (e) { toast('Error: ' + e.message); }
+  try { const m = previewMovies[id] && !previewMovies[id].error ? previewMovies[id] : await fetchMovie(id); delete previewMovies[id]; m.list = list; if (list === 'seen') m.watchedAt = m.watchedAt || Date.now(); state.movies[id] = m; save(); toast(list === 'seen' ? `Marked ${m.name} as watched` : `${m.name} added to your watchlist`); if (!quiet) render(); return true; }
+  catch (e) { toast('Error: ' + e.message); return false; }
 }
 function setMovieList(id, list) { const m = state.movies[id]; if (!m) return; m.list = list; if (list === 'seen' && !m.watchedAt) m.watchedAt = Date.now(); if (list === 'want') m.watchedAt = null; save(); render(); }
 // pools of popular titles used to pad suggestion rows to a full 6 or 12
@@ -359,10 +382,17 @@ async function loadPools() {
   } catch (e) {}
 }
 function fill(list, pools, exclude) {
-  // Always return 6 or 12 items when enough material exists
-  const target = list.length >= 12 ? 12 : 6; const out = list.slice(0, target); const ids = new Set(out.map(x => x.id));
-  for (const pool of pools) for (const r of pool) { if (out.length >= target) break; if (ids.has(r.id) || exclude(r.id)) continue; ids.add(r.id); out.push({ ...r, pad: true }); }
+  // Always return 6 or 12 visible items when enough material exists, plus up to 6 hidden spares that slide in when a card is added or dismissed
+  const target = list.length >= 12 ? 12 : 6; const out = list.slice(0, target + 6); const ids = new Set(out.map(x => x.id));
+  for (const pool of pools) for (const r of pool) { if (out.length >= target + 6) break; if (ids.has(r.id) || exclude(r.id)) continue; ids.add(r.id); out.push({ ...r, pad: true }); }
+  out.forEach((x, i) => { if (i >= target) x.spare = true; });
   return out;
+}
+// remove a suggestion card and reveal the next spare in the same row
+function swapCard(card) {
+  if (!card) return; const grid = card.parentElement; card.remove();
+  const spare = grid && grid.querySelector('.card.rec[hidden]'); if (spare) spare.hidden = false;
+  if (grid && !grid.querySelector('.card.rec')) { const panel = grid.closest('.panel'); if (panel) panel.remove(); }
 }
 async function refreshShow(id, quiet) {
   try { const old = state.shows[id]; const fresh = await fetchShow(id); fresh.added = old.added; fresh.archived = old.archived; state.shows[id] = fresh; save(); if (!quiet) toast(`Refreshed ${fresh.name}`); }
@@ -472,7 +502,7 @@ function showResultRow(r, why) {
 function bindResultButtons(box) {
   box.querySelectorAll('[data-add]').forEach(b => b.onclick = () => addShow(+b.dataset.add));
   box.querySelectorAll('[data-open]').forEach(b => b.onclick = () => go('show', +b.dataset.open));
-  box.querySelectorAll('[data-person]').forEach(b => b.onclick = () => go('person', { id: +b.dataset.person, name: b.dataset.name }));
+  box.querySelectorAll('[data-person]').forEach(b => b.onclick = e => { e.preventDefault(); go('person', { id: +b.dataset.person, name: b.dataset.name }); });
   box.querySelectorAll('[data-mwant]').forEach(b => b.onclick = () => addMovie(+b.dataset.mwant, 'want'));
   box.querySelectorAll('[data-mseen]').forEach(b => b.onclick = () => addMovie(+b.dataset.mseen, 'seen'));
   box.querySelectorAll('[data-mopen]').forEach(b => b.onclick = e => { e.preventDefault(); go('movie', +b.dataset.mopen); });
@@ -480,7 +510,7 @@ function bindResultButtons(box) {
 }
 function bindSearch() {
   const q = $('#q'); let t;
-  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { searchMode = b.dataset.mode; navigated = true; render(); $('#q').focus(); });
+  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { const typed = $('#q').value; searchMode = b.dataset.mode; navigated = true; render(); const q2 = $('#q'); q2.value = typed; q2.focus(); if (typed.trim().length >= 2) q2.dispatchEvent(new Event('input')); });
   const run = async () => {
     const term = q.value.trim(); const box = $('#results');
     if (term.length < 2) { box.innerHTML = ''; return; }
@@ -501,9 +531,9 @@ function bindSearch() {
         const list = (d.results || []).filter(p => p.known_for_department !== 'Sound').slice(0, 8);
         if (!list.length) { box.innerHTML = '<div class="panel muted">No results</div>'; return; }
         box.innerHTML = `<div class="panel"><h2>People</h2>${list.map(p => `<div class="row">
-          ${p.profile_path ? `<img class="poster" src="${IMG}w92${p.profile_path}" alt="" style="border-radius:50%;width:48px;height:48px">` : '<div class="poster" style="border-radius:50%;width:48px;height:48px"></div>'}
-          <div class="grow"><div class="title">${esc(p.name)}</div><div class="sub">${esc(p.known_for_department || '')}${(p.known_for || []).length ? ' · ' + esc(p.known_for.map(k => k.name || k.title).join(', ')) : ''}</div></div>
-          <button class="small primary" data-person="${p.id}" data-name="${esc(p.name)}">${lastCtx === 'movie' ? 'See movies' : 'See shows'}</button></div>`).join('')}</div>`;
+          ${p.profile_path ? `<img class="poster" src="${IMG}w92${p.profile_path}" alt="" data-person="${p.id}" data-name="${esc(p.name)}" style="border-radius:50%;width:48px;height:48px;cursor:pointer">` : '<div class="poster" style="border-radius:50%;width:48px;height:48px"></div>'}
+          <div class="grow"><div class="title"><a href="#" data-person="${p.id}" data-name="${esc(p.name)}" style="color:inherit;text-decoration:none">${esc(p.name)}</a></div><div class="sub">${esc(p.known_for_department || '')}${(p.known_for || []).length ? ' · ' + esc(p.known_for.map(k => k.name || k.title).join(', ')) : ''}</div></div>
+          <button class="small primary" data-person="${p.id}" data-name="${esc(p.name)}">Shows &amp; movies</button></div>`).join('')}</div>`;
       }
       bindResultButtons(box);
     } catch (e) { box.innerHTML = `<div class="panel muted">Search failed: ${esc(e.message)}</div>`; }
@@ -572,7 +602,7 @@ function recCard(r, why, tag, kind) {
     ? (state.shows[r.id] ? `<button class="small" data-open="${r.id}" style="flex:1">Open</button>` : `<button class="small primary" data-add="${r.id}" style="flex:1">+ Add</button><button class="small ghost" data-dismiss="${r.id}" title="Not interested">✕</button>`)
     : (state.movies[r.id] ? `<button class="small" data-mopen="${r.id}" style="flex:1">Open</button>` : `<button class="small primary" data-mwant="${r.id}" style="flex:1" title="Add to watchlist">+ Want</button><button class="small" data-mseen="${r.id}" title="Mark as watched">✓</button><button class="small ghost" data-mdismiss="${r.id}" title="Not interested">✕</button>`);
   const m = kind === 'movie' && state.movies[r.id];
-  return `<div class="card rec" data-rec="${r.id}" ${kind === 'tv' ? `data-show="${r.id}"` : `data-mopen="${r.id}"`} title="${esc(r.over)}">
+  return `<div class="card rec" data-rec="${r.id}" ${kind === 'tv' ? `data-show="${r.id}"` : `data-mopen="${r.id}"`} title="${esc(r.over)}"${r.spare ? ' hidden' : ''}>
     <img src="${IMG}w342${r.poster}" alt="" loading="lazy">${r.vote ? `<span class="rt">★ ${(+r.vote).toFixed(1)}</span>` : ''}${m ? `<span class="tag ${m.list}">${m.list === 'seen' ? 'SEEN' : 'WANT'}</span>` : tag ? `<span class="tag">${tag}</span>` : ''}
     <div class="body"><div class="name">${esc(r.name)}</div><div class="sub">${r.year || (r.release ? r.release : '')}${kind === 'movie' && r.release && r.release > TODAY ? ` · ${relDay(r.release)}` : ''}</div>${why ? `<div class="why">${esc(why)}</div>` : ''}
     <div class="split" style="margin-top:6px">${btns}</div></div></div>`;
@@ -685,8 +715,11 @@ function showHTML() {
           &nbsp; ${preview ? `${p.total} episodes aired` : `${p.watched}/${p.total} episodes watched`}${up ? ` · next episode ${relDay(up.air)} (${code(up.s, up.e)})` : ''}</div>
         ${s.over ? `<div class="help" style="margin-top:6px">${esc(s.over)}</div>` : ''}
         ${preview ? '' : barHTML(s, p, 'max-width:320px')}
-        ${preview ? `<div class="actions"><button class="primary" data-add="${s.id}">+ Add to my shows</button>${s.imdb ? `<a class="small muted" style="align-self:center;font-size:13px" href="https://www.imdb.com/title/${s.imdb}/" target="_blank" rel="noopener">IMDb ↗</a>` : ''}</div>
-        <div class="help" style="margin-top:8px">Not in your shows yet — browse the episodes below, then add it to start tracking.</div>` : `<div class="actions">
+        ${preview ? `<div class="actions"><button class="primary" data-add="${s.id}">+ Add to my shows</button>
+          ${nx ? `<button class="small" data-season="${s.id}|${nx.s}|1" title="Adds the show and marks season ${nx.s} as watched">✓ Whole season ${nx.s}</button>` : ''}
+          ${p.total ? `<button class="small" data-allshow="${s.id}" title="Adds the show and marks every aired episode as watched">✓ Whole show</button>` : ''}
+          ${s.imdb ? `<a class="small muted" style="align-self:center;font-size:13px" href="https://www.imdb.com/title/${s.imdb}/" target="_blank" rel="noopener">IMDb ↗</a>` : ''}</div>
+        <div class="help" style="margin-top:8px">Not in your shows yet — ticking any episode below adds it automatically.</div>` : `<div class="actions">
           ${nx ? `<button class="primary small" data-watch="${s.id}|${nx.s}|${nx.e}">✓ Watched ${code(nx.s, nx.e)}</button>` : ''}
           ${nx ? `<button class="small" data-season="${s.id}|${nx.s}|1" title="Mark every aired episode of season ${nx.s} as watched">✓ Whole season ${nx.s}</button>` : ''}
           ${p.watched < p.total ? `<button class="small" data-allshow="${s.id}" title="Mark every aired episode as watched">✓ Whole show</button>` : ''}
@@ -701,9 +734,9 @@ function showHTML() {
     ${seasons.map(sn => { const eps = s.eps.filter(e => e.s === sn); const a = eps.filter(aired); const w = a.filter(e => isWatched(s.id, e.s, e.e)).length; const open = sn === openSeason;
       return `<div class="season">
         <div class="season-head" data-toggle="${sn}"><h3>${esc(s.seasonNames[sn] || 'Season ' + sn)} <span class="muted" style="font-weight:400;font-size:13px">${w}/${a.length}${eps.length > a.length ? ` · ${eps.length - a.length} upcoming` : ''}</span></h3>
-          ${a.length && !preview ? `<button class="small" data-season="${s.id}|${sn}|${w < a.length ? 1 : 0}">${w < a.length ? 'Mark all watched' : 'Unwatch all'}</button>` : ''}<span class="muted">${open ? '▾' : '▸'}</span></div>
+          ${a.length ? `<button class="small" data-season="${s.id}|${sn}|${w < a.length ? 1 : 0}">${w < a.length ? 'Mark all watched' : 'Unwatch all'}</button>` : ''}<span class="muted">${open ? '▾' : '▸'}</span></div>
         <div id="season-${sn}" ${open ? '' : 'hidden'}>${eps.map(ep => `<div class="ep ${aired(ep) ? '' : 'future'}">
-          ${preview ? '<div></div>' : `<div class="chk ${isWatched(s.id, ep.s, ep.e) ? 'on' : ''}" data-toggle-ep="${s.id}|${ep.s}|${ep.e}" role="checkbox" aria-checked="${isWatched(s.id, ep.s, ep.e)}">✓</div>`}
+          <div class="chk ${isWatched(s.id, ep.s, ep.e) ? 'on' : ''}" data-toggle-ep="${s.id}|${ep.s}|${ep.e}" role="checkbox" aria-checked="${isWatched(s.id, ep.s, ep.e)}">✓</div>
           <div class="num">${code(ep.s, ep.e).slice(3)}</div>
           <div class="n"><div class="t lnk" data-ep="${s.id}|${ep.s}|${ep.e}" title="Episode details">${esc(ep.name) || code(ep.s, ep.e)}</div></div>
           <div class="d">${ep.air ? (ep.air > TODAY ? relDay(ep.air) : fmtDate(ep.air, { day: 'numeric', month: 'short', year: 'numeric' })) : 'TBA'}${ep.at && ep.air >= TODAY ? ` ${localTime(ep.at)}` : ''}${ep.runtime ? ` · ${ep.runtime}m` : ''}</div>
@@ -801,7 +834,7 @@ function moviesHTML() {
   else if (moviesTab === 'seen') body = seen.length ? `<div class="grid">${seen.map(movieCard).join('')}</div>` : '<div class="empty">No movies marked as watched yet.</div>';
   else if (moviesTab === 'foryou') {
     const sug = movieSuggestions(); const list = fill(sug, [P.movPop || [], P.movTop || []], excludeMov);
-    const avail = want.filter(m => m.providers && m.providers.stream.length && !(m.release > TODAY));
+    const avail = want.filter(m => m.providers && m.providers.stream.length && !(m.release > TODAY)).sort((a, b) => (onMyServices(b) ? 1 : 0) - (onMyServices(a) ? 1 : 0));
     body = (avail.length ? `<h2>From your watchlist, streaming now</h2><div class="grid">${avail.slice(0, 6).map(movieCard).join('')}</div>` : '')
       + (list.length ? `<h2 style="margin-top:14px">Suggested for you</h2><div class="grid six">${list.map(r => recCard(r, r.pad ? 'Popular right now' : 'Because you liked ' + r.from[0], '', 'movie')).join('')}</div>` : '<div class="empty">Add or mark a few movies and suggestions will appear here.</div>');
   } else {
@@ -846,20 +879,21 @@ function watchStats() {
   let eps = 0, mins = 0; const perShow = [], genreMins = {}, months = {};
   for (const s of Object.values(state.shows)) {
     const w = state.watched[s.id] || {}; const avg = avgRuntime(s); let sm = 0, se = 0;
-    for (const ep of s.eps) { const ts = w[epKey(ep.s, ep.e)]; if (!ts) continue; const r = ep.runtime || avg; se++; sm += r; const mk = new Date(ts).toISOString().slice(0, 7); months[mk] = (months[mk] || 0) + 1; }
+    for (const ep of s.eps) { const ts = w[epKey(ep.s, ep.e)]; if (!ts) continue; const r = ep.runtime || avg; se++; sm += r; const mk = monthKey(ts); months[mk] = (months[mk] || 0) + 1; }
     if (se) { perShow.push({ s, eps: se, mins: sm, done: progress(s).watched === progress(s).total && !s.inProd && /Ended|Canceled/.test(s.status) }); eps += se; mins += sm; (s.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + sm); }
   }
   const movies = Object.values(state.movies).filter(m => m.list === 'seen'); let mmins = 0;
-  for (const m of movies) { mmins += m.runtime || 110; (m.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + (m.runtime || 110)); if (m.watchedAt) { const mk = new Date(m.watchedAt).toISOString().slice(0, 7); months[mk] = (months[mk] || 0) + 1; } }
+  for (const m of movies) { mmins += m.runtime || 110; (m.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + (m.runtime || 110)); if (m.watchedAt) { const mk = monthKey(m.watchedAt); months[mk] = (months[mk] || 0) + 1; } }
   perShow.sort((a, b) => b.mins - a.mins);
   return { eps, mins, perShow, movies: movies.length, mmins, genres: Object.entries(genreMins).sort((a, b) => b[1] - a[1]).slice(0, 8), months };
 }
+const monthKey = ts => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); };
 const fmtDur = mins => { const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), m = mins % 60; return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; };
 function spaceHTML() {
   const st = watchStats(); const total = st.mins + st.mmins; const shows = Object.values(state.shows);
   const completed = shows.filter(s => { const p = progress(s); return p.total && p.watched === p.total && /Ended|Canceled/.test(s.status); }).length;
   const caught = shows.filter(s => !s.archived && !nextToWatch(s)).length;
-  const now = new Date(); const mk = []; for (let i = 11; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); mk.push([d.toISOString().slice(0, 7), d.toLocaleDateString(undefined, { month: 'short' })]); }
+  const now = new Date(); const mk = []; for (let i = 11; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); mk.push([monthKey(d), d.toLocaleDateString(undefined, { month: 'short' })]); }
   const maxM = Math.max(1, ...mk.map(([k]) => st.months[k] || 0)); const maxG = st.genres.length ? st.genres[0][1] : 1;
   const nothing = !shows.length && !Object.keys(state.movies).length;
   return `<div class="panel"><h2>My space</h2>
@@ -887,13 +921,19 @@ function settingsHTML() {
     <div class="kv" style="margin-top:14px"><label>Username</label><div><input type="text" id="username" value="${esc(profile ? profile.username : '')}" maxlength="24" placeholder="3–24 letters, digits, _"><div class="help" style="margin-top:4px">Friends find you by username. Your profile link: <b>${location.origin}/#u/${esc(profile ? profile.username : '')}</b></div></div></div>
     <div class="kv"><label>Display name</label><input type="text" id="displayName" value="${esc(profile ? profile.display_name || '' : '')}" maxlength="40"></div>
     <div class="kv"><label>Profile visibility</label><div><label style="color:var(--text)"><input type="checkbox" id="isPublic" ${profile && profile.is_public ? 'checked' : ''}> Public — members can see my lists and follow me</label><div class="help" style="margin-top:4px">Private means nobody sees your lists, and friends' suggestions won't include you.</div></div></div>
+    <div class="split"><button class="primary" id="saveProfile">Save profile</button></div>
+  </div>
+  <div class="panel"><h2>My subscriptions</h2>
+    <p class="help">Tick the services you pay for. They’re highlighted on every show and movie, and “What should I watch” puts titles you can stream right now first.</p>
+    <div id="subsBox" class="split" style="gap:6px">${subsHTML()}</div>
+    <div class="split" style="margin-top:10px"><button class="primary" id="saveSubs">Save subscriptions</button></div>
   </div>
   <div class="panel"><h2>Settings</h2>
     ${CFG.API ? '' : `<div class="kv"><label>TMDB API key</label><input type="password" id="key" value="${esc(state.apiKey)}" placeholder="API key or read access token"></div>
     <div class="kv"><label>OMDb API key <span class="help">(optional, for IMDb ratings)</span></label><div><input type="password" id="omdb" value="${esc(state.omdbKey || '')}" placeholder="Free key from omdbapi.com/apikey.aspx"></div></div>`}
     <div class="kv"><label>Streaming region</label><div><select id="region">${REGIONS.map(([c, n]) => `<option value="${c}" ${c === state.region ? 'selected' : ''}>${n}</option>`).join('')}</select><div class="help" style="margin-top:4px">Which country’s catalogue to use for “where to watch” (data from JustWatch via TMDB). Refresh all shows after changing it.</div></div></div>
     <div class="kv"><label>Language</label><select id="lang">${['en-US', 'fr-FR', 'ar-TN', 'de-DE', 'es-ES', 'it-IT'].map(l => `<option ${l === state.lang ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
-    <div class="split"><button class="primary" id="saveSettings">Save</button><button id="refreshAll">↻ Refresh all shows now</button></div>
+    <div class="split"><button class="primary" id="saveSettings">Save settings</button><button id="refreshAll">↻ Refresh all shows now</button></div>
     <p class="help">Shows are refreshed automatically when you open the app if their data is older than 20 hours.</p>
   </div>
   <div class="panel"><h2>Your data</h2>
@@ -910,16 +950,19 @@ function settingsHTML() {
 /* ============ bindings ============ */
 function bindCommon() {
   document.querySelectorAll('[data-show]').forEach(el => el.onclick = e => { e.preventDefault(); go('show', +el.dataset.show); });
-  document.querySelectorAll('[data-watch]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = b.dataset.watch.split('|').map(Number); setWatched(id, s, ep, true); render(); });
-  document.querySelectorAll('[data-toggle-ep]').forEach(b => b.onclick = () => { const [id, s, ep] = b.dataset.toggleEp.split('|').map(Number); setWatched(id, s, ep, !isWatched(id, s, ep)); render(); });
-  document.querySelectorAll('[data-season]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, sn, on] = b.dataset.season.split('|').map(Number); state.shows[id].eps.filter(ep => ep.s === sn && aired(ep)).forEach(ep => setWatched(id, ep.s, ep.e, !!on, true)); save(); render(); });
-  document.querySelectorAll('[data-allshow]').forEach(b => b.onclick = () => { const id = +b.dataset.allshow; if (!confirm('Mark every aired episode as watched?')) return; state.shows[id].eps.filter(aired).forEach(ep => setWatched(id, ep.s, ep.e, true, true)); save(); render(); });
-  document.querySelectorAll('#app [data-dismiss]').forEach(b => b.onclick = e => { e.stopPropagation(); state.dismissed = state.dismissed || []; state.dismissed.push(+b.dataset.dismiss); save(); render(); });
-  document.querySelectorAll('#app .card.rec [data-add], #app .card.rec [data-open], #app .person[data-person]').forEach(b => b.onclick = e => { e.stopPropagation();
-    if (b.dataset.add) addShow(+b.dataset.add); else if (b.dataset.open) go('show', +b.dataset.open); else go('person', { id: +b.dataset.person, name: b.dataset.name }); });
-  document.querySelectorAll('#app .card.rec [data-mwant], #app .card.rec [data-mseen], #app .card.rec [data-mopen], #app .card.rec [data-mdismiss]').forEach(b => b.onclick = e => { e.stopPropagation();
-    if (b.dataset.mwant) addMovie(+b.dataset.mwant, 'want'); else if (b.dataset.mseen) addMovie(+b.dataset.mseen, 'seen'); else if (b.dataset.mopen) go('movie', +b.dataset.mopen);
-    else { state.dismissedM.push(+b.dataset.mdismiss); save(); render(); } });
+  document.querySelectorAll('[data-watch]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = b.dataset.watch.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, true); render(); });
+  document.querySelectorAll('[data-toggle-ep]').forEach(b => b.onclick = () => { const [id, s, ep] = b.dataset.toggleEp.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, !isWatched(id, s, ep)); render(); });
+  document.querySelectorAll('[data-season]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, sn, on] = b.dataset.season.split('|').map(Number); if (!ensureTracked(id)) return; state.shows[id].eps.filter(ep => ep.s === sn && aired(ep)).forEach(ep => setWatched(id, ep.s, ep.e, !!on, true)); save(); render(); });
+  document.querySelectorAll('[data-allshow]').forEach(b => b.onclick = () => { const id = +b.dataset.allshow; if (!confirm('Mark every aired episode as watched?')) return; if (!ensureTracked(id)) return; state.shows[id].eps.filter(aired).forEach(ep => setWatched(id, ep.s, ep.e, true, true)); save(); render(); });
+  document.querySelectorAll('#app [data-dismiss]').forEach(b => b.onclick = e => { e.stopPropagation(); state.dismissed = state.dismissed || []; state.dismissed.push(+b.dataset.dismiss); save(); swapCard(b.closest('.card.rec')); });
+  document.querySelectorAll('#app .card.rec [data-add], #app .card.rec [data-open], #app .person[data-person]').forEach(b => b.onclick = async e => { e.stopPropagation();
+    if (b.dataset.add) { b.disabled = true; b.textContent = 'Adding…'; const card = b.closest('.card.rec'); if (await addShow(+b.dataset.add, true)) swapCard(card); else { b.disabled = false; b.textContent = '+ Add'; } }
+    else if (b.dataset.open) go('show', +b.dataset.open); else go('person', { id: +b.dataset.person, name: b.dataset.name }); });
+  document.querySelectorAll('#app .card.rec [data-mwant], #app .card.rec [data-mseen], #app .card.rec [data-mopen], #app .card.rec [data-mdismiss]').forEach(b => b.onclick = async e => { e.stopPropagation();
+    const card = b.closest('.card.rec');
+    if (b.dataset.mwant || b.dataset.mseen) { const id = +(b.dataset.mwant || b.dataset.mseen); card.querySelectorAll('button').forEach(x => x.disabled = true); if (await addMovie(id, b.dataset.mwant ? 'want' : 'seen', true)) swapCard(card); else card.querySelectorAll('button').forEach(x => x.disabled = false); }
+    else if (b.dataset.mopen) go('movie', +b.dataset.mopen);
+    else { state.dismissedM.push(+b.dataset.mdismiss); save(); swapCard(card); } });
   document.querySelectorAll('#app .card[data-mopen]').forEach(c => c.onclick = () => go('movie', +c.dataset.mopen));
   document.querySelectorAll('#app .detail-head [data-add], #app .detail-head [data-mwant], #app .detail-head [data-mseen], #app .actions [data-add]').forEach(b => b.onclick = () => {
     if (b.dataset.add) addShow(+b.dataset.add); else if (b.dataset.mwant) addMovie(+b.dataset.mwant, 'want'); else addMovie(+b.dataset.mseen, 'seen'); });
@@ -939,9 +982,12 @@ function bindCommon() {
   }
   if ($('#ics')) $('#ics').onclick = exportICS;
   if (view.name === 'settings') {
-    $('#saveSettings').onclick = async () => {
+    $('#saveSettings').onclick = () => {
       if ($('#key')) { state.apiKey = $('#key').value.trim(); state.omdbKey = $('#omdb').value.trim(); }
-      state.lang = $('#lang').value; state.region = $('#region').value;
+      const regionChanged = state.region !== $('#region').value;
+      state.lang = $('#lang').value; state.region = $('#region').value; save(); toast('Saved'); if (regionChanged) { state.provList = null; state.pools = null; render(); } };
+    $('#saveSubs').onclick = () => { state.subs = [...document.querySelectorAll('#subsBox input:checked')].map(i => i.value); save(); toast(state.subs.length ? `Saved ${state.subs.length} subscription${state.subs.length > 1 ? 's' : ''}` : 'No subscriptions selected'); render(); };
+    $('#saveProfile').onclick = async () => {
       const patch = { username: $('#username').value.trim().toLowerCase(), display_name: $('#displayName').value.trim(), is_public: $('#isPublic').checked };
       if (!/^[a-z0-9_]{3,24}$/.test(patch.username)) return toast('Username: 3–24 lowercase letters, digits or _');
       save();
@@ -1139,7 +1185,7 @@ async function createProfile(u) {
   return null;
 }
 async function loadFromDb() {
-  if (profile) { state.region = profile.region || state.region; state.lang = profile.lang || state.lang; state.dismissed = profile.dismissed || []; state.dismissedM = profile.dismissed_m || []; }
+  if (profile) { state.region = profile.region || state.region; state.lang = profile.lang || state.lang; state.dismissed = profile.dismissed || []; state.dismissedM = profile.dismissed_m || []; state.subs = profile.subscriptions || []; }
   const [shows, watched, movies] = await Promise.all([
     sb.from('user_shows').select('show_id,data,archived,added_at').eq('user_id', user.id).order('added_at'),
     sb.from('watched_episodes').select('show_id,season,episode,watched_at').eq('user_id', user.id),
@@ -1158,7 +1204,7 @@ function snapshot() {
   const shows = {}; for (const id in state.shows) shows[id] = JSON.stringify(strip(state.shows[id], ['archived', 'added', 'fetched'])) + '|' + (state.shows[id].archived ? 1 : 0);
   const watched = {}; for (const id in state.watched) for (const k in state.watched[id]) watched[id + ':' + k] = state.watched[id][k];
   const movies = {}; for (const id in state.movies) movies[id] = JSON.stringify(strip(state.movies[id], ['list', 'watchedAt', 'added', 'fetched'])) + '|' + state.movies[id].list + '|' + (state.movies[id].watchedAt || '');
-  const prof = JSON.stringify([state.region, state.lang, state.dismissed, state.dismissedM]);
+  const prof = JSON.stringify([state.region, state.lang, state.dismissed, state.dismissedM, state.subs]);
   return { shows, watched, movies, prof };
 }
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(runSync, 500); }
@@ -1181,7 +1227,7 @@ async function runSync() {
     const delM = Object.keys(old.movies).filter(id => !(id in now.movies)).map(Number);
     if (upM.length) ops.push(sb.from('user_movies').upsert(upM));
     if (delM.length) ops.push(sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM));
-    if (now.prof !== old.prof) ops.push(sb.from('profiles').update({ region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM }).eq('id', user.id));
+    if (now.prof !== old.prof) ops.push(sb.from('profiles').update({ region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM, subscriptions: state.subs || [] }).eq('id', user.id));
     const results = await Promise.all(ops);
     const err = results.find(r => r && r.error);
     if (err) throw err.error;
