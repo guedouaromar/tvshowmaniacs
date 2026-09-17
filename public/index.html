@@ -175,7 +175,7 @@ let state = blank();
 function blank() { return { apiKey: '', omdbKey: '', lang: 'en-US', region: 'FR', shows: {}, watched: {}, order: [], trend: null, movies: {}, pools: null, dismissed: [], dismissedM: [], subs: [], provList: null }; }
 function normalize(s) { const b = blank(); for (const k in b) if (s[k] === undefined) s[k] = b[k]; return s; }
 function loadLocal(key) { try { const s = JSON.parse(localStorage.getItem(key)); if (s && s.shows) return normalize(s); } catch (e) {} return null; }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} if (user) scheduleSync(); }
+function save(now) { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} if (user) { if (now) { clearTimeout(syncTimer); syncTimer = null; runSync(); } else scheduleSync(); } }
 
 /* ============ helpers ============ */
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -952,8 +952,8 @@ function bindCommon() {
   document.querySelectorAll('[data-show]').forEach(el => el.onclick = e => { e.preventDefault(); go('show', +el.dataset.show); });
   document.querySelectorAll('[data-watch]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = b.dataset.watch.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, true); render(); });
   document.querySelectorAll('[data-toggle-ep]').forEach(b => b.onclick = () => { const [id, s, ep] = b.dataset.toggleEp.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, !isWatched(id, s, ep)); render(); });
-  document.querySelectorAll('[data-season]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, sn, on] = b.dataset.season.split('|').map(Number); if (!ensureTracked(id)) return; state.shows[id].eps.filter(ep => ep.s === sn && aired(ep)).forEach(ep => setWatched(id, ep.s, ep.e, !!on, true)); save(); render(); });
-  document.querySelectorAll('[data-allshow]').forEach(b => b.onclick = () => { const id = +b.dataset.allshow; if (!confirm('Mark every aired episode as watched?')) return; if (!ensureTracked(id)) return; state.shows[id].eps.filter(aired).forEach(ep => setWatched(id, ep.s, ep.e, true, true)); save(); render(); });
+  document.querySelectorAll('[data-season]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, sn, on] = b.dataset.season.split('|').map(Number); if (!ensureTracked(id)) return; state.shows[id].eps.filter(ep => ep.s === sn && aired(ep)).forEach(ep => setWatched(id, ep.s, ep.e, !!on, true)); save(true); render(); });
+  document.querySelectorAll('[data-allshow]').forEach(b => b.onclick = () => { const id = +b.dataset.allshow; if (!confirm('Mark every aired episode as watched?')) return; if (!ensureTracked(id)) return; state.shows[id].eps.filter(aired).forEach(ep => setWatched(id, ep.s, ep.e, true, true)); save(true); render(); });
   document.querySelectorAll('#app [data-dismiss]').forEach(b => b.onclick = e => { e.stopPropagation(); state.dismissed = state.dismissed || []; state.dismissed.push(+b.dataset.dismiss); save(); swapCard(b.closest('.card.rec')); });
   document.querySelectorAll('#app .card.rec [data-add], #app .card.rec [data-open], #app .person[data-person]').forEach(b => b.onclick = async e => { e.stopPropagation();
     if (b.dataset.add) { b.disabled = true; b.textContent = 'Adding…'; const card = b.closest('.card.rec'); if (await addShow(+b.dataset.add, true)) swapCard(card); else { b.disabled = false; b.textContent = '+ Add'; } }
@@ -1129,7 +1129,9 @@ function mergeImport(d) {
 }
 
 /* ============ auth + sync (Supabase) ============ */
-const sb = (CFG.SUPABASE_URL && window.supabase) ? window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON) : null;
+// keepalive lets small writes (ticks, profile) finish even if the tab is closed right after; bodies over ~60 KB (show data) can't use it
+const keepFetch = (url, opts) => { const u = String(url); const small = /\/rest\/v1\/(watched_episodes|profiles|follows|user_movies)/.test(u) && (!opts || !opts.body || String(opts.body).length < 60000); return fetch(url, small ? { ...opts, keepalive: true } : opts); };
+const sb = (CFG.SUPABASE_URL && window.supabase) ? window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON, { global: { fetch: keepFetch } }) : null;
 function loginHTML() {
   return `<div class="panel setup">
     <h2>TVShowManiacs</h2>
@@ -1150,7 +1152,7 @@ function bindLogin() {
 }
 async function forceSignOut(msg) {
   try { await sb.auth.signOut(); } catch (e) {}
-  try { Object.keys(localStorage).filter(k => k.startsWith('tvsm.cache.')).forEach(k => localStorage.removeItem(k)); } catch (e) {}
+  try { Object.keys(localStorage).filter(k => k.startsWith('tvsm.cache.') || k.startsWith('tvsm.synced.')).forEach(k => localStorage.removeItem(k)); } catch (e) {}
   user = null; profile = null; state = blank(); navigated = true; render(); if (msg) toast(msg);
 }
 async function onSignedIn(u) {
@@ -1160,6 +1162,8 @@ async function onSignedIn(u) {
   u = chk.user;
   user = u; KEY = 'tvsm.cache.' + u.id;
   state = loadLocal(KEY) || blank();
+  // If the previous session left unsynced changes (closed the tab mid-sync, lost network…), push them first so the pull below doesn't erase them
+  try { const st = JSON.parse(localStorage.getItem('tvsm.synced.' + u.id)); if (st && st.shows) { synced = st; if (JSON.stringify(snapshot()) !== JSON.stringify(st)) { setSyncState('Saving earlier changes…'); await runSync(); } } } catch (e) {}
   let { data: p } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
   if (!p) p = await createProfile(u);
   profile = p || null;
@@ -1195,7 +1199,7 @@ async function loadFromDb() {
   for (const r of shows.data) { const d = r.data; d.id = r.show_id; d.archived = r.archived; d.added = new Date(r.added_at).getTime(); state.shows[r.show_id] = d; state.order.push(r.show_id); state.watched[r.show_id] = {}; }
   for (const r of watched.data) { (state.watched[r.show_id] = state.watched[r.show_id] || {})[epKey(r.season, r.episode)] = new Date(r.watched_at).getTime(); }
   for (const r of movies.data) { const d = r.data; d.id = r.movie_id; d.list = r.list; d.watchedAt = r.watched_at ? new Date(r.watched_at).getTime() : null; d.added = new Date(r.added_at).getTime(); state.movies[r.movie_id] = d; }
-  synced = snapshot();
+  synced = snapshot(); try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(synced)); } catch (e) {}
 }
 // Sync = diff the current state against the last synced snapshot and write only what changed.
 let synced = null, syncTimer = null, syncing = false, syncAgain = false;
@@ -1211,7 +1215,7 @@ function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(runSyn
 async function runSync() {
   if (!user || !sb) return;
   if (syncing) { syncAgain = true; return; }
-  syncing = true; setSyncState('Saving…');
+  syncing = true; syncTimer = null; setSyncState('Saving…');
   try {
     const now = snapshot(); const old = synced || { shows: {}, watched: {}, movies: {}, prof: '' };
     const ops = [];
@@ -1231,12 +1235,13 @@ async function runSync() {
     const results = await Promise.all(ops);
     const err = results.find(r => r && r.error);
     if (err) throw err.error;
-    synced = now; setSyncState('');
+    synced = now; setSyncState(''); try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(now)); } catch (e) {}
   } catch (e) { setSyncState('⚠ Not saved: ' + (e.message || e)); console.error('sync', e); setTimeout(scheduleSync, 15000); }
   finally { syncing = false; if (syncAgain) { syncAgain = false; scheduleSync(); } }
 }
 function setSyncState(t) { const el = $('#syncState'); if (el) el.textContent = t ? t + ' · ' : ''; }
-window.addEventListener('beforeunload', () => { if (syncTimer) runSync(); });
+window.addEventListener('beforeunload', () => { if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; runSync(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && syncTimer) { clearTimeout(syncTimer); syncTimer = null; runSync(); } });
 
 /* ============ boot ============ */
 if (sb) {
