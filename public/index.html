@@ -1162,12 +1162,14 @@ async function onSignedIn(u) {
   u = chk.user;
   user = u; KEY = 'tvsm.cache.' + u.id;
   state = loadLocal(KEY) || blank();
-  // If the previous session left unsynced changes (closed the tab mid-sync, lost network…), push them first so the pull below doesn't erase them
-  try { const st = JSON.parse(localStorage.getItem('tvsm.synced.' + u.id)); if (st && st.shows) { synced = st; if (JSON.stringify(snapshot()) !== JSON.stringify(st)) { setSyncState('Saving earlier changes…'); await runSync(); } } } catch (e) {}
+  // Anything changed locally since the last successful sync (tab closed mid-save, lost network, a failed write) is kept and re-applied after the pull below
+  const localDelta = pendingDelta(u.id);
   let { data: p } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
   if (!p) p = await createProfile(u);
   profile = p || null;
-  try { await loadFromDb(); } catch (e) { toast('Could not load your data: ' + e.message); }
+  let loaded = false;
+  try { await loadFromDb(); loaded = true; } catch (e) { toast('Could not load your data: ' + e.message); }
+  if (loaded && localDelta) { applyDelta(localDelta); save(true); }
   // one-time import of data saved by the old single-file version in this browser
   const legacy = loadLocal(LEGACY_KEY);
   if (legacy && Object.keys(legacy.shows).length + Object.keys(legacy.movies || {}).length && !Object.keys(state.shows).length && !Object.keys(state.movies).length) {
@@ -1201,6 +1203,30 @@ async function loadFromDb() {
   for (const r of movies.data) { const d = r.data; d.id = r.movie_id; d.list = r.list; d.watchedAt = r.watched_at ? new Date(r.watched_at).getTime() : null; d.added = new Date(r.added_at).getTime(); state.movies[r.movie_id] = d; }
   synced = snapshot(); try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(synced)); } catch (e) {}
 }
+// What the local copy holds that the last successful sync didn't: computed before pulling from the database, re-applied after.
+function pendingDelta(uid) {
+  let st = null; try { st = JSON.parse(localStorage.getItem('tvsm.synced.' + uid)); } catch (e) {}
+  if (!st || !st.shows) return null;
+  const cur = snapshot(); const d = { shows: {}, delShows: [], watched: {}, delWatched: [], movies: {}, delMovies: [], prof: null };
+  for (const id in cur.shows) if (cur.shows[id] !== st.shows[id] && state.shows[id]) d.shows[id] = state.shows[id];
+  for (const id in st.shows) if (!(id in cur.shows)) d.delShows.push(+id);
+  for (const k in cur.watched) if (cur.watched[k] !== st.watched[k]) d.watched[k] = cur.watched[k];
+  for (const k in st.watched) if (!(k in cur.watched)) d.delWatched.push(k);
+  for (const id in cur.movies) if (cur.movies[id] !== st.movies[id] && state.movies[id]) d.movies[id] = state.movies[id];
+  for (const id in st.movies) if (!(id in cur.movies)) d.delMovies.push(+id);
+  if (cur.prof !== st.prof) d.prof = { region: state.region, lang: state.lang, dismissed: state.dismissed, dismissedM: state.dismissedM, subs: state.subs };
+  const empty = !Object.keys(d.shows).length && !d.delShows.length && !Object.keys(d.watched).length && !d.delWatched.length && !Object.keys(d.movies).length && !d.delMovies.length && !d.prof;
+  return empty ? null : d;
+}
+function applyDelta(d) {
+  for (const id in d.shows) { state.shows[id] = d.shows[id]; if (!state.order.includes(+id)) state.order.push(+id); state.watched[id] = state.watched[id] || {}; }
+  d.delShows.forEach(id => { delete state.shows[id]; delete state.watched[id]; state.order = state.order.filter(x => x !== id); });
+  for (const k in d.watched) { const [id, sn, ep] = k.split(/[:-]/).map(Number); if (!state.shows[id]) continue; (state.watched[id] = state.watched[id] || {})[epKey(sn, ep)] = d.watched[k]; }
+  d.delWatched.forEach(k => { const [id, sn, ep] = k.split(/[:-]/).map(Number); if (state.watched[id]) delete state.watched[id][epKey(sn, ep)]; });
+  for (const id in d.movies) state.movies[id] = d.movies[id];
+  d.delMovies.forEach(id => delete state.movies[id]);
+  if (d.prof) Object.assign(state, { region: d.prof.region, lang: d.prof.lang, dismissed: d.prof.dismissed, dismissedM: d.prof.dismissedM, subs: d.prof.subs });
+}
 // Sync = diff the current state against the last synced snapshot and write only what changed.
 let synced = null, syncTimer = null, syncing = false, syncAgain = false;
 const strip = (o, keys) => { const c = { ...o }; keys.forEach(k => delete c[k]); return c; };
@@ -1216,28 +1242,40 @@ async function runSync() {
   if (!user || !sb) return;
   if (syncing) { syncAgain = true; return; }
   syncing = true; syncTimer = null; setSyncState('Saving…');
+  // Each table is synced independently: a failure in one (e.g. a big show record) must never block the others (e.g. your ticks).
+  const now = snapshot(); const old = synced || { shows: {}, watched: {}, movies: {}, prof: '' };
+  const next = { shows: { ...old.shows }, watched: { ...old.watched }, movies: { ...old.movies }, prof: old.prof };
+  const errors = [];
+  const run = async (label, fn, commit) => { try { const r = await fn(); if (r && r.error) throw r.error; commit(); } catch (e) { errors.push(label + ': ' + (e.message || e)); console.error('sync ' + label, e); } };
   try {
-    const now = snapshot(); const old = synced || { shows: {}, watched: {}, movies: {}, prof: '' };
-    const ops = [];
-    const upShows = Object.keys(now.shows).filter(id => now.shows[id] !== old.shows[id]).map(id => ({ user_id: user.id, show_id: +id, data: strip(state.shows[id], ['archived', 'added']), archived: !!state.shows[id].archived, added_at: new Date(state.shows[id].added || Date.now()).toISOString() }));
+    // shows — one request per changed show so a single oversized record can't sink the batch
+    const chShows = Object.keys(now.shows).filter(id => now.shows[id] !== old.shows[id]);
+    for (const id of chShows) await run('show ' + (state.shows[id] && state.shows[id].name || id), () => sb.from('user_shows').upsert({ user_id: user.id, show_id: +id, data: strip(state.shows[id], ['archived', 'added']), archived: !!state.shows[id].archived, added_at: new Date(state.shows[id].added || Date.now()).toISOString() }), () => { next.shows[id] = now.shows[id]; });
     const delShows = Object.keys(old.shows).filter(id => !(id in now.shows)).map(Number);
-    if (upShows.length) ops.push(sb.from('user_shows').upsert(upShows));
-    if (delShows.length) ops.push(sb.from('user_shows').delete().eq('user_id', user.id).in('show_id', delShows));
-    const upW = Object.keys(now.watched).filter(k => now.watched[k] !== old.watched[k]).map(k => { const [id, s, e] = k.split(/[:-]/).map(Number); return { user_id: user.id, show_id: id, season: s, episode: e, watched_at: new Date(now.watched[k]).toISOString() }; });
-    const delW = Object.keys(old.watched).filter(k => !(k in now.watched)).map(k => k.split(/[:-]/).map(Number));
-    if (upW.length) ops.push(sb.from('watched_episodes').upsert(upW));
-    for (const [id, s, e] of delW) ops.push(sb.from('watched_episodes').delete().match({ user_id: user.id, show_id: id, season: s, episode: e }));
-    const upM = Object.keys(now.movies).filter(id => now.movies[id] !== old.movies[id]).map(id => ({ user_id: user.id, movie_id: +id, data: strip(state.movies[id], ['list', 'watchedAt', 'added']), list: state.movies[id].list, watched_at: state.movies[id].watchedAt ? new Date(state.movies[id].watchedAt).toISOString() : null, added_at: new Date(state.movies[id].added || Date.now()).toISOString() }));
+    if (delShows.length) await run('remove shows', () => sb.from('user_shows').delete().eq('user_id', user.id).in('show_id', delShows), () => delShows.forEach(id => delete next.shows[id]));
+    // watched episodes
+    const chW = Object.keys(now.watched).filter(k => now.watched[k] !== old.watched[k]);
+    if (chW.length) await run('episodes', () => sb.from('watched_episodes').upsert(chW.map(k => { const [id, sn, ep] = k.split(/[:-]/).map(Number); return { user_id: user.id, show_id: id, season: sn, episode: ep, watched_at: new Date(now.watched[k]).toISOString() }; })), () => chW.forEach(k => next.watched[k] = now.watched[k]));
+    const delW = Object.keys(old.watched).filter(k => !(k in now.watched));
+    for (const k of delW) { const [id, sn, ep] = k.split(/[:-]/).map(Number); await run('untick', () => sb.from('watched_episodes').delete().match({ user_id: user.id, show_id: id, season: sn, episode: ep }), () => delete next.watched[k]); }
+    // movies
+    const chM = Object.keys(now.movies).filter(id => now.movies[id] !== old.movies[id]);
+    for (const id of chM) await run('movie ' + (state.movies[id] && state.movies[id].name || id), () => sb.from('user_movies').upsert({ user_id: user.id, movie_id: +id, data: strip(state.movies[id], ['list', 'watchedAt', 'added']), list: state.movies[id].list, watched_at: state.movies[id].watchedAt ? new Date(state.movies[id].watchedAt).toISOString() : null, added_at: new Date(state.movies[id].added || Date.now()).toISOString() }), () => { next.movies[id] = now.movies[id]; });
     const delM = Object.keys(old.movies).filter(id => !(id in now.movies)).map(Number);
-    if (upM.length) ops.push(sb.from('user_movies').upsert(upM));
-    if (delM.length) ops.push(sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM));
-    if (now.prof !== old.prof) ops.push(sb.from('profiles').update({ region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM, subscriptions: state.subs || [] }).eq('id', user.id));
-    const results = await Promise.all(ops);
-    const err = results.find(r => r && r.error);
-    if (err) throw err.error;
-    synced = now; setSyncState(''); try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(now)); } catch (e) {}
-  } catch (e) { setSyncState('⚠ Not saved: ' + (e.message || e)); console.error('sync', e); setTimeout(scheduleSync, 15000); }
-  finally { syncing = false; if (syncAgain) { syncAgain = false; scheduleSync(); } }
+    if (delM.length) await run('remove movies', () => sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM), () => delM.forEach(id => delete next.movies[id]));
+    // profile (settings, dismissed suggestions, subscriptions)
+    if (now.prof !== old.prof) {
+      const patch = { region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM, subscriptions: state.subs || [] };
+      let r = await sb.from('profiles').update(patch).eq('id', user.id);
+      if (r.error && /subscriptions/.test(r.error.message)) { delete patch.subscriptions; r = await sb.from('profiles').update(patch).eq('id', user.id); if (!r.error) toast('Subscriptions need the latest schema.sql run in Supabase'); }
+      await run('settings', async () => r, () => { next.prof = now.prof; });
+    }
+  } finally {
+    synced = next; try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(next)); } catch (e) {}
+    if (errors.length) { setSyncState('⚠ Not saved (' + errors[0] + ')'); if (!runSync.warned) { runSync.warned = true; toast('Could not save to your account: ' + errors[0]); } setTimeout(scheduleSync, 15000); }
+    else { setSyncState(''); runSync.warned = false; }
+    syncing = false; if (syncAgain) { syncAgain = false; scheduleSync(); }
+  }
 }
 function setSyncState(t) { const el = $('#syncState'); if (el) el.textContent = t ? t + ' · ' : ''; }
 window.addEventListener('beforeunload', () => { if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; runSync(); } });
