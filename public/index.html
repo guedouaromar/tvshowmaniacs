@@ -1104,10 +1104,10 @@ function memberHTML() {
 async function loadMember() {
   const uname = view.arg; memberData = { username: uname, loading: true }; const { data: p } = await sb.from('profiles').select('id,username,display_name,avatar_url,is_public').eq('username', uname).maybeSingle();
   if (!p) { memberData = { username: uname, missing: true }; if (view.name === 'member') render(); return; }
-  const [shows, watched, movies, stats] = await Promise.all([
+  const [shows, movies, stats] = await Promise.all([
     sb.from('user_shows').select('show_id,data,archived').eq('user_id', p.id).order('added_at', { ascending: false }),
-    sb.from('watched_episodes').select('show_id').eq('user_id', p.id), sb.from('user_movies').select('movie_id,data,list').eq('user_id', p.id).order('added_at', { ascending: false }), sb.rpc('profile_stats', { uid: p.id })]);
-  const wc = {}; (watched.data || []).forEach(r => wc[r.show_id] = (wc[r.show_id] || 0) + 1);
+    sb.from('user_movies').select('movie_id,data,list').eq('user_id', p.id).order('added_at', { ascending: false }), sb.rpc('profile_stats', { uid: p.id })]);
+  const wc = {}; for (let from = 0; ; from += 1000) { const r = await sb.from('watched_episodes').select('show_id').eq('user_id', p.id).order('show_id').order('season').order('episode').range(from, from + 999); (r.data || []).forEach(x => wc[x.show_id] = (wc[x.show_id] || 0) + 1); if (!r.data || r.data.length < 1000) break; }
   const slimRow = r => ({ show_id: r.show_id, archived: r.archived, data: { name: r.data.name, poster: r.data.poster, year: r.data.year, vote: r.data.vote }, watched: wc[r.show_id] || 0, total: (r.data.eps || []).filter(e => e.air && e.air <= TODAY).length });
   memberData = { username: uname, profile: p, shows: (shows.data || []).map(slimRow), movies: (movies.data || []).map(r => ({ movie_id: r.movie_id, list: r.list, data: { name: r.data.name, poster: r.data.poster, year: r.data.year, vote: r.data.vote } })), stats: stats.data && stats.data[0] };
   if (!friendsData.following.length) await loadFriends();
@@ -1192,11 +1192,12 @@ async function createProfile(u) {
 }
 async function loadFromDb() {
   if (profile) { state.region = profile.region || state.region; state.lang = profile.lang || state.lang; state.dismissed = profile.dismissed || []; state.dismissedM = profile.dismissed_m || []; state.subs = profile.subscriptions || []; }
+  // Supabase caps every request at 1,000 rows, so read in pages (a few bulk-marked shows already exceed 1,000 episodes)
+  const all = async (table, cols, order) => { const out = []; for (let from = 0; ; from += 1000) { const r = await sb.from(table).select(cols).eq('user_id', user.id).order(order.k, { ascending: true }).order(order.k2 || order.k, { ascending: true }).range(from, from + 999); if (r.error) throw r.error; out.push(...r.data); if (r.data.length < 1000) break; } return { data: out }; };
   const [shows, watched, movies] = await Promise.all([
-    sb.from('user_shows').select('show_id,data,archived,added_at').eq('user_id', user.id).order('added_at'),
-    sb.from('watched_episodes').select('show_id,season,episode,watched_at').eq('user_id', user.id),
-    sb.from('user_movies').select('movie_id,data,list,watched_at,added_at').eq('user_id', user.id)]);
-  for (const r of [shows, watched, movies]) if (r.error) throw r.error;
+    all('user_shows', 'show_id,data,archived,added_at', { k: 'added_at', k2: 'show_id' }),
+    all('watched_episodes', 'show_id,season,episode,watched_at', { k: 'show_id', k2: 'season' }),
+    all('user_movies', 'movie_id,data,list,watched_at,added_at', { k: 'added_at', k2: 'movie_id' })]);
   state.shows = {}; state.order = []; state.watched = {}; state.movies = {};
   for (const r of shows.data) { const d = r.data; d.id = r.show_id; d.archived = r.archived; d.added = new Date(r.added_at).getTime(); state.shows[r.show_id] = d; state.order.push(r.show_id); state.watched[r.show_id] = {}; }
   for (const r of watched.data) { (state.watched[r.show_id] = state.watched[r.show_id] || {})[epKey(r.season, r.episode)] = new Date(r.watched_at).getTime(); }
