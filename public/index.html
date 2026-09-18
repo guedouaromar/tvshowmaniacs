@@ -1139,7 +1139,7 @@ function loginHTML() {
     ${sb ? `<button class="primary" id="googleLogin" style="padding:10px 18px">Continue with Google</button>
     <div class="help" style="margin:14px 0 6px">or get a sign-in link by e-mail</div>
     <div class="split" style="justify-content:center"><input type="text" id="emailLogin" placeholder="you@example.com" style="max-width:280px" autocomplete="email"><button id="emailGo">Send link</button></div>
-    <div id="loginMsg" class="help" style="margin-top:10px"></div>`
+    <div id="loginMsg" class="help" style="margin-top:10px">${loginStatus ? esc(loginStatus) : ''}</div>`
     : `<div class="help">Sign-in is not configured yet (SUPABASE_URL missing in config.js).</div>`}
     <p class="help" style="margin-top:22px">Free, no ads. <a href="/privacy.html">Privacy &amp; credits</a></p>
   </div>`;
@@ -1150,22 +1150,39 @@ function bindLogin() {
   $('#emailGo').onclick = async () => { const email = $('#emailLogin').value.trim(); if (!email) return; const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + '/' } }); $('#loginMsg').textContent = error ? error.message : 'Check your inbox for the sign-in link.'; };
   $('#emailLogin').onkeydown = e => { if (e.key === 'Enter') $('#emailGo').click(); };
 }
+let loginStatus = '';   // shown on the login panel: what sign-in is doing, or why it failed
+function setLoginStatus(t) { loginStatus = t || ''; const el = $('#loginMsg'); if (el) el.textContent = loginStatus; }
 async function forceSignOut(msg) {
   try { await sb.auth.signOut(); } catch (e) {}
   try { Object.keys(localStorage).filter(k => k.startsWith('tvsm.cache.') || k.startsWith('tvsm.synced.')).forEach(k => localStorage.removeItem(k)); } catch (e) {}
-  user = null; profile = null; state = blank(); navigated = true; render(); if (msg) toast(msg);
+  user = null; profile = null; state = blank(); navigated = true; loginStatus = msg || ''; render(); if (msg) toast(msg);
 }
-async function onSignedIn(u) {
-  // Make sure the account still exists on the server (a cached session survives the user being deleted in Supabase)
+// Sign-in runs once at a time: the session check at boot and the SIGNED_IN event both call this within milliseconds.
+let signingIn = null;
+function onSignedIn(u) {
+  if (user || signingIn) return signingIn;
+  signingIn = onSignedIn0(u).catch(e => {
+    console.error('sign-in failed', e);
+    if (user) { navigated = true; render(); toast('Signed in, but part of your data could not be loaded: ' + (e.message || e)); }
+    else setLoginStatus('Sign-in failed: ' + (e.message || e) + ' — please try again.');
+  }).finally(() => { signingIn = null; });
+  return signingIn;
+}
+async function onSignedIn0(u) {
+  setLoginStatus('Signing you in…');
+  // Make sure the account still exists on the server (a cached session survives the user being deleted in Supabase).
+  // Only a definite "no such user" answer signs you out; a flaky network must not.
   const { data: chk, error: chkErr } = await sb.auth.getUser();
-  if (chkErr || !chk || !chk.user) return forceSignOut('Your session is no longer valid — please sign in again.');
-  u = chk.user;
-  user = u; KEY = 'tvsm.cache.' + u.id;
+  if (chkErr && (chkErr.status === 401 || chkErr.status === 403 || /does not exist|not found|invalid claim/i.test(chkErr.message || ''))) return forceSignOut('Your session is no longer valid — please sign in again.');
+  if (chk && chk.user) u = chk.user; else if (chkErr) toast('Working offline: ' + chkErr.message);
+  if (!u || !u.id) return forceSignOut('Sign-in did not complete — please try again.');
+  user = u; KEY = 'tvsm.cache.' + u.id; loginStatus = '';
   state = loadLocal(KEY) || blank();
   // Anything changed locally since the last successful sync (tab closed mid-save, lost network, a failed write) is kept and re-applied after the pull below
   const localDelta = pendingDelta(u.id);
-  let { data: p } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
-  if (!p) p = await createProfile(u);
+  let { data: p, error: pErr } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
+  if (pErr) toast('Could not read your profile: ' + pErr.message);
+  else if (!p) p = await createProfile(u);
   profile = p || null;
   let loaded = false;
   try { await loadFromDb(); loaded = true; } catch (e) { toast('Could not load your data: ' + e.message); }
@@ -1286,9 +1303,18 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 if (sb) {
   const routeHash = () => { const h = location.hash.match(/^#u\/([a-z0-9_]+)/i); if (h) { view = { name: 'member', arg: h[1].toLowerCase() }; history.replaceState(null, '', '/'); if (user) { navigated = true; render(); } } };
   routeHash(); window.addEventListener('hashchange', routeHash);
+  // Supabase sends sign-in failures back in the URL (#error=…&error_description=…), e.g. an expired or already-used e-mail link. Show them instead of a silent login page.
+  const authErr = (() => { const q = new URLSearchParams(location.hash.replace(/^#/, '')), s = new URLSearchParams(location.search); const d = q.get('error_description') || s.get('error_description'), c = q.get('error_code') || s.get('error_code') || q.get('error') || s.get('error'); return d || c ? { code: c || '', desc: (d || c).replace(/\+/g, ' ') } : null; })();
+  if (authErr) {
+    const hint = /otp_expired|expired|invalid/i.test(authErr.code + ' ' + authErr.desc) ? ' The link only works once and for a short time — request a new one and open it in this same browser (some mail apps open it in a preview first).' : /database|saving new user/i.test(authErr.desc) ? ' The database refused the new account — run supabase/schema.sql again in the Supabase SQL editor.' : '';
+    loginStatus = 'Sign-in failed: ' + authErr.desc + '.' + hint; history.replaceState(null, '', '/');
+  } else if (/access_token=|(\?|&)code=/.test(location.hash + location.search)) loginStatus = 'Signing you in…';
   render();
-  sb.auth.getSession().then(({ data }) => { if (data.session) onSignedIn(data.session.user); });
-  sb.auth.onAuthStateChange((ev, session) => { if (ev === 'SIGNED_IN' && session && !user) onSignedIn(session.user); if (ev === 'SIGNED_OUT') { user = null; render(); } });
+  sb.auth.getSession().then(({ data, error }) => { if (data && data.session) onSignedIn(data.session.user); else if (error) setLoginStatus('Sign-in failed: ' + error.message); else if (!authErr && loginStatus) setLoginStatus('Sign-in failed: the link did not contain a valid session. Please request a new one.'); }, e => setLoginStatus('Sign-in failed: ' + (e.message || e)));
+  sb.auth.onAuthStateChange((ev, session) => {
+    if (ev === 'SIGNED_IN' && session) onSignedIn(session.user);
+    if (ev === 'SIGNED_OUT') { user = null; profile = null; state = blank(); render(); }
+  });
 } else { // no backend configured: single-user mode with a personal TMDB key, data in this browser only
   user = { id: 'local' }; state = loadLocal(LEGACY_KEY) || blank(); render(); if (state.apiKey) refreshAll(false);
 }
