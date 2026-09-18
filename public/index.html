@@ -174,8 +174,25 @@ let user = null, profile = null;     // Supabase auth user + our profiles row
 let state = blank();
 function blank() { return { apiKey: '', omdbKey: '', lang: 'en-US', region: 'FR', shows: {}, watched: {}, order: [], trend: null, movies: {}, pools: null, dismissed: [], dismissedM: [], subs: [], provList: null }; }
 function normalize(s) { const b = blank(); for (const k in b) if (s[k] === undefined) s[k] = b[k]; return s; }
-function loadLocal(key) { try { const s = JSON.parse(localStorage.getItem(key)); if (s && s.shows) return normalize(s); } catch (e) {} return null; }
-function save(now) { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} if (user) { if (now) { clearTimeout(syncTimer); syncTimer = null; runSync(); } else scheduleSync(); } }
+function loadLocal(key) { try { const s = JSON.parse(localStorage.getItem(key)); if (s && s.shows) { try { Object.assign(s, JSON.parse(localStorage.getItem(key + '.aux')) || {}); } catch (e) {} return normalize(s); } } catch (e) {} return null; }
+// localStorage is ~5 MB per site. Sign-in itself needs room there (Supabase stores the session), so on a quota error we shed caches first, then retry.
+const AUX_KEYS = ['pools', 'trend', 'provList'];   // re-fetchable caches, stored apart so they can be dropped
+function persist() {
+  const core = { ...state }; AUX_KEYS.forEach(k => delete core[k]);
+  const write = () => { localStorage.setItem(KEY, JSON.stringify(core)); try { localStorage.setItem(KEY + '.aux', JSON.stringify({ pools: state.pools, trend: state.trend, provList: state.provList })); } catch (e) { localStorage.removeItem(KEY + '.aux'); } };
+  try { write(); } catch (e) { tidyStorage(true); try { localStorage.removeItem(KEY + '.aux'); localStorage.setItem(KEY, JSON.stringify(core)); } catch (e2) { if (!persist.warned) { persist.warned = true; toast('This browser\'s storage is full — your data is saved to your account but not cached locally.'); } } }
+}
+function tidyStorage(aggressive) {
+  try {
+    const size = () => Object.keys(localStorage).reduce((n, k) => n + k.length + (localStorage.getItem(k) || '').length, 0);
+    const mine = k => KEY !== LEGACY_KEY && k.startsWith(KEY);
+    if (size() < 3000000 && !aggressive) return;
+    Object.keys(localStorage).forEach(k => { if (k.endsWith('.aux') || k.startsWith('tvsm.synced.') || (k === LEGACY_KEY && user) || (k.startsWith('tvsm.cache.') && !mine(k))) localStorage.removeItem(k); });
+    if (size() > 4000000 || aggressive) Object.keys(localStorage).forEach(k => { if (k.startsWith('tvsm.cache.') && !mine(k)) localStorage.removeItem(k); });
+    if (size() > 4000000) Object.keys(localStorage).forEach(k => { if (k.startsWith('tvsm.')) localStorage.removeItem(k); });   // everything is in the account; the cache is rebuilt on sign-in
+  } catch (e) {}
+}
+function save(now) { persist(); if (user) { if (now) { clearTimeout(syncTimer); syncTimer = null; runSync(); } else scheduleSync(); } }
 
 /* ============ helpers ============ */
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -310,7 +327,7 @@ async function fetchShow(id) {
     const res = await Promise.all(chunk.map(s => tmdb(`/tv/${id}/season/${s.season_number}`).catch(() => null)));
     res.forEach((sd, j) => {
       if (!sd) return;
-      for (const ep of sd.episodes || []) eps.push({ s: sd.season_number, e: ep.episode_number, name: ep.name || '', air: ep.air_date || null, runtime: ep.runtime || null, over: (ep.overview || '').slice(0, 300) });
+      for (const ep of sd.episodes || []) eps.push({ s: sd.season_number, e: ep.episode_number, name: ep.name || '', air: ep.air_date || null, runtime: ep.runtime || null, over: (ep.overview || '').slice(0, 160) });
     });
   }
   eps.sort((a, b) => a.s - b.s || a.e - b.e);
@@ -1131,6 +1148,7 @@ function mergeImport(d) {
 /* ============ auth + sync (Supabase) ============ */
 // keepalive lets small writes (ticks, profile) finish even if the tab is closed right after; bodies over ~60 KB (show data) can't use it
 const keepFetch = (url, opts) => { const u = String(url); const small = /\/rest\/v1\/(watched_episodes|profiles|follows|user_movies)/.test(u) && (!opts || !opts.body || String(opts.body).length < 60000); return fetch(url, small ? { ...opts, keepalive: true } : opts); };
+tidyStorage(false);
 const sb = (CFG.SUPABASE_URL && window.supabase) ? window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON, { global: { fetch: keepFetch } }) : null;
 function loginHTML() {
   return `<div class="panel setup">
@@ -1224,7 +1242,7 @@ async function loadFromDb() {
 // What the local copy holds that the last successful sync didn't: computed before pulling from the database, re-applied after.
 function pendingDelta(uid) {
   let st = null; try { st = JSON.parse(localStorage.getItem('tvsm.synced.' + uid)); } catch (e) {}
-  if (!st || !st.shows) return null;
+  if (!st || !st.shows || st.v !== 2) return null;   // older snapshots stored full copies; not comparable
   const cur = snapshot(); const d = { shows: {}, delShows: [], watched: {}, delWatched: [], movies: {}, delMovies: [], prof: null };
   for (const id in cur.shows) if (cur.shows[id] !== st.shows[id] && state.shows[id]) d.shows[id] = state.shows[id];
   for (const id in st.shows) if (!(id in cur.shows)) d.delShows.push(+id);
@@ -1247,13 +1265,15 @@ function applyDelta(d) {
 }
 // Sync = diff the current state against the last synced snapshot and write only what changed.
 let synced = null, syncTimer = null, syncing = false, syncAgain = false;
+// short fingerprint of a record (the last-synced snapshot used to keep whole copies, which doubled the storage footprint)
+function hash(str) { let h1 = 0x811c9dc5, h2 = 0x1b873593; for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = Math.imul(h2 + c, 2654435761) ^ (h2 >>> 13); } return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36) + str.length.toString(36); }
 const strip = (o, keys) => { const c = { ...o }; keys.forEach(k => delete c[k]); return c; };
 function snapshot() {
-  const shows = {}; for (const id in state.shows) shows[id] = JSON.stringify(strip(state.shows[id], ['archived', 'added', 'fetched'])) + '|' + (state.shows[id].archived ? 1 : 0);
+  const shows = {}; for (const id in state.shows) shows[id] = hash(JSON.stringify(strip(state.shows[id], ['archived', 'added', 'fetched']))) + '|' + (state.shows[id].archived ? 1 : 0);
   const watched = {}; for (const id in state.watched) for (const k in state.watched[id]) watched[id + ':' + k] = state.watched[id][k];
-  const movies = {}; for (const id in state.movies) movies[id] = JSON.stringify(strip(state.movies[id], ['list', 'watchedAt', 'added', 'fetched'])) + '|' + state.movies[id].list + '|' + (state.movies[id].watchedAt || '');
+  const movies = {}; for (const id in state.movies) movies[id] = hash(JSON.stringify(strip(state.movies[id], ['list', 'watchedAt', 'added', 'fetched']))) + '|' + state.movies[id].list + '|' + (state.movies[id].watchedAt || '');
   const prof = JSON.stringify([state.region, state.lang, state.dismissed, state.dismissedM, state.subs]);
-  return { shows, watched, movies, prof };
+  return { v: 2, shows, watched, movies, prof };
 }
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(runSync, 500); }
 async function runSync() {
@@ -1262,7 +1282,7 @@ async function runSync() {
   syncing = true; syncTimer = null; setSyncState('Saving…');
   // Each table is synced independently: a failure in one (e.g. a big show record) must never block the others (e.g. your ticks).
   const now = snapshot(); const old = synced || { shows: {}, watched: {}, movies: {}, prof: '' };
-  const next = { shows: { ...old.shows }, watched: { ...old.watched }, movies: { ...old.movies }, prof: old.prof };
+  const next = { v: 2, shows: { ...old.shows }, watched: { ...old.watched }, movies: { ...old.movies }, prof: old.prof };
   const errors = [];
   const run = async (label, fn, commit) => { try { const r = await fn(); if (r && r.error) throw r.error; commit(); } catch (e) { errors.push(label + ': ' + (e.message || e)); console.error('sync ' + label, e); } };
   try {
