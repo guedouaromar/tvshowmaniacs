@@ -109,6 +109,9 @@
   .person img, .person .ph { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; background: var(--panel-2); margin: 0 auto 4px; display: block; }
   .person .pn { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .person .pc { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stars { display:inline-flex; gap:2px; cursor:pointer; user-select:none; font-size:18px; line-height:1; }
+  .stars span { color: var(--line); transition: color .1s; } .stars span.on, .stars:hover span.hover { color: #f5b301; } .stars span:hover { transform: scale(1.15); }
+  .stars.sm { font-size:15px; }
   .card .why { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .card.rec .rt { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,.7); border-radius: 6px; padding: 2px 6px; font-size: 12px; font-weight: 600; }
   .card.rec { position: relative; }
@@ -172,10 +175,44 @@ const IMG = 'https://image.tmdb.org/t/p/';
 let KEY = LEGACY_KEY;                 // becomes tvsm.cache.<user id> after sign-in
 let user = null, profile = null;     // Supabase auth user + our profiles row
 let state = blank();
-function blank() { return { apiKey: '', omdbKey: '', lang: 'en-US', region: 'FR', shows: {}, watched: {}, order: [], trend: null, movies: {}, pools: null, dismissed: [], dismissedM: [] }; }
+function blank() { return { apiKey: '', omdbKey: '', lang: 'en-US', region: 'FR', shows: {}, watched: {}, order: [], trend: null, movies: {}, pools: null, dismissed: [], dismissedM: [], subs: [], provList: null }; }
 function normalize(s) { const b = blank(); for (const k in b) if (s[k] === undefined) s[k] = b[k]; return s; }
-function loadLocal(key) { try { const s = JSON.parse(localStorage.getItem(key)); if (s && s.shows) return normalize(s); } catch (e) {} return null; }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} if (user) scheduleSync(); }
+function loadLocal(key) { try { const s = JSON.parse(localStorage.getItem(key)); if (s && s.shows) { try { Object.assign(s, JSON.parse(localStorage.getItem(key + '.aux')) || {}); } catch (e) {} return normalize(s); } } catch (e) {} return null; }
+// localStorage is ~5 MB per site. Sign-in itself needs room there (Supabase stores the session), so on a quota error we shed caches first, then retry.
+const AUX_KEYS = ['pools', 'trend', 'provList'];   // re-fetchable caches, stored apart so they can be dropped
+function persist() {
+  const core = { ...state }; AUX_KEYS.forEach(k => delete core[k]);
+  const write = () => { localStorage.setItem(KEY, JSON.stringify(core)); try { localStorage.setItem(KEY + '.aux', JSON.stringify({ pools: state.pools, trend: state.trend, provList: state.provList })); } catch (e) { localStorage.removeItem(KEY + '.aux'); } };
+  try { write(); } catch (e) { tidyStorage(true); try { localStorage.removeItem(KEY + '.aux'); localStorage.setItem(KEY, JSON.stringify(core)); } catch (e2) { if (!persist.warned) { persist.warned = true; toast('This browser\'s storage is full — your data is saved to your account but not cached locally.'); } } }
+}
+/* ---- backups: IndexedDB has a far larger quota than localStorage, so full snapshots are kept there (last 15 per account) ---- */
+const idb = { open() { return new Promise((res, rej) => { const r = indexedDB.open('tvsm', 1); r.onupgradeneeded = () => r.result.createObjectStore('backups', { keyPath: 'key' }); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
+  async put(rec) { const db = await this.open(); await new Promise((res, rej) => { const t = db.transaction('backups', 'readwrite'); t.objectStore('backups').put(rec); t.oncomplete = res; t.onerror = () => rej(t.error); }); db.close(); },
+  async all() { const db = await this.open(); const rows = await new Promise((res, rej) => { const r = db.transaction('backups').objectStore('backups').getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); db.close(); return rows; },
+  async del(key) { const db = await this.open(); await new Promise((res, rej) => { const t = db.transaction('backups', 'readwrite'); t.objectStore('backups').delete(key); t.oncomplete = res; t.onerror = () => rej(t.error); }); db.close(); } };
+async function backupJson(uid, json, reason) {
+  try { const d = JSON.parse(json); const shows = Object.keys(d.shows || {}).length, movies = Object.keys(d.movies || {}).length, ticks = Object.values(d.watched || {}).reduce((n, v) => n + Object.keys(v || {}).length, 0);
+    if (!shows && !movies) return;
+    ['pools', 'trend', 'provList', 'apiKey', 'omdbKey'].forEach(k => delete d[k]);
+    await idb.put({ key: uid + '|' + Date.now(), uid, ts: Date.now(), reason, shows, movies, ticks, json: JSON.stringify(d) });
+    const mine = (await idb.all()).filter(b => b.uid === uid).sort((a, b) => b.ts - a.ts); for (const b of mine.slice(15)) await idb.del(b.key);
+  } catch (e) { console.warn('backup failed', e); }
+}
+function backupNow(reason) { if (user && user.id !== 'local') return backupJson(user.id, JSON.stringify(state), reason || 'manual'); }
+// a snapshot per day, plus whenever something is about to be discarded
+function autoBackup() { const k = 'tvsm.lastBackup.' + (user ? user.id : 'local'); let last = 0; try { last = +localStorage.getItem(k) || 0; } catch (e) {} if (Date.now() - last > 86400000) { try { localStorage.setItem(k, String(Date.now())); } catch (e) {} backupNow('daily'); } }
+function tidyStorage(aggressive) {
+  try {
+    const size = () => Object.keys(localStorage).reduce((n, k) => n + k.length + (localStorage.getItem(k) || '').length, 0);
+    const mine = k => KEY !== LEGACY_KEY && k.startsWith(KEY);
+    if (size() < 3000000 && !aggressive) return;
+    const drop = k => { if (k.startsWith('tvsm.cache.') && !k.endsWith('.aux') || k === LEGACY_KEY) backupJson(k === LEGACY_KEY ? 'legacy' : k.slice(11), localStorage.getItem(k) || '{}', 'storage full'); localStorage.removeItem(k); };
+    Object.keys(localStorage).forEach(k => { if (k.endsWith('.aux') || (k === LEGACY_KEY && user) || (k.startsWith('tvsm.cache.') && !mine(k))) drop(k); });
+    if (size() > 4000000 || aggressive) Object.keys(localStorage).forEach(k => { if (k.startsWith('tvsm.cache.') && !mine(k)) drop(k); });
+    if (size() > 4000000) Object.keys(localStorage).forEach(k => { if (k.startsWith('tvsm.')) drop(k); });   // the cache is rebuilt on sign-in; a copy goes to the backups list first
+  } catch (e) {}
+}
+function save(now) { persist(); if (user && user.id !== 'local') autoBackup(); if (user) { if (now) { clearTimeout(syncTimer); syncTimer = null; runSync(); } else scheduleSync(); } }
 
 /* ============ helpers ============ */
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -210,9 +247,26 @@ function airsLine(s) {
   const local = nxt && nxt.at ? ` · next one available ${fmtDate(nxt.air)} at ${localTime(nxt.at)} your time` : '';
   return parts.length || local ? `<div class="meta" style="margin-top:4px">🕘 ${parts.join(' ')}${local}</div>` : '';
 }
+const haveSub = name => (state.subs || []).some(sname => sname.toLowerCase() === (name || '').toLowerCase());
+const onMyServices = item => !!(item && item.providers && item.providers.stream.some(x => haveSub(x.name)));
+function subsHTML() {
+  const list = state.provList && state.provList.region === state.region ? state.provList.list : null;
+  if (!list) { loadProviderList(); return '<span class="help">Loading services for ' + esc(regionName()) + '…</span>'; }
+  return list.map(pv => `<label class="badge" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:5px 10px;${haveSub(pv.name) ? 'border-color:var(--ok);color:var(--text)' : ''}"><input type="checkbox" value="${esc(pv.name)}" ${haveSub(pv.name) ? 'checked' : ''} style="margin:0">${pv.logo ? `<img src="${IMG}w45${pv.logo}" alt="" style="width:16px;height:16px;border-radius:3px">` : ''}${esc(pv.name)}</label>`).join('');
+}
+async function loadProviderList() {
+  if (loadProviderList.busy) return; loadProviderList.busy = true;
+  try { const d = await tmdb('/watch/providers/tv', { watch_region: state.region });
+    const list = (d.results || []).filter(x => x.display_priorities && x.display_priorities[state.region] !== undefined).sort((a, b) => a.display_priorities[state.region] - b.display_priorities[state.region]).slice(0, 30).map(x => ({ name: x.provider_name, logo: x.logo_path }));
+    // keep any subscription the user already ticked even if it isn't in the top 30
+    (state.subs || []).forEach(n => { if (!list.some(x => x.name === n)) list.push({ name: n, logo: null }); });
+    state.provList = { region: state.region, list }; save(); if (view.name === 'settings' && $('#subsBox')) $('#subsBox').innerHTML = subsHTML(); }
+  catch (e) { if ($('#subsBox')) $('#subsBox').innerHTML = '<span class="help">Could not load the list of services: ' + esc(e.message) + '</span>'; }
+  finally { loadProviderList.busy = false; }
+}
 function providersHTML(s) {
   const p = s.providers; if (!p) return '';
-  const chip = x => `<span class="badge" style="display:inline-flex;align-items:center;gap:5px;color:var(--text)">${x.logo ? `<img src="${IMG}w45${x.logo}" alt="" style="width:16px;height:16px;border-radius:3px">` : ''}${esc(x.name)}</span>`;
+  const chip = x => `<span class="badge" style="display:inline-flex;align-items:center;gap:5px;color:var(--text);${haveSub(x.name) ? 'border-color:var(--ok);background:rgba(61,220,132,.12)' : ''}" title="${haveSub(x.name) ? 'You subscribe to this' : ''}">${x.logo ? `<img src="${IMG}w45${x.logo}" alt="" style="width:16px;height:16px;border-radius:3px">` : ''}${esc(x.name)}${haveSub(x.name) ? ' ✓' : ''}</span>`;
   if (!p.stream.length && !p.rent.length) return `<div class="meta" style="margin-top:6px">📺 No streaming platform listed for ${regionName(p.region)}${s.network ? ` · broadcast on ${esc(s.network)}` : ''}</div>`;
   return `<div class="meta" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:5px;align-items:center">📺 ${p.stream.length ? `Stream on ${p.stream.map(chip).join(' ')}` : ''}${p.rent.length ? `<span class="help">${p.stream.length ? ' · ' : ''}Rent/buy: ${p.rent.slice(0, 3).map(x => esc(x.name)).join(', ')}</span>` : ''}
     <span class="help">(${regionName(p.region)})</span></div>`;
@@ -293,7 +347,7 @@ async function fetchShow(id) {
     const res = await Promise.all(chunk.map(s => tmdb(`/tv/${id}/season/${s.season_number}`).catch(() => null)));
     res.forEach((sd, j) => {
       if (!sd) return;
-      for (const ep of sd.episodes || []) eps.push({ s: sd.season_number, e: ep.episode_number, name: ep.name || '', air: ep.air_date || null, runtime: ep.runtime || null, over: (ep.overview || '').slice(0, 300) });
+      for (const ep of sd.episodes || []) eps.push({ s: sd.season_number, e: ep.episode_number, name: ep.name || '', air: ep.air_date || null, runtime: ep.runtime || null, over: (ep.overview || '').slice(0, 160) });
     });
   }
   eps.sort((a, b) => a.s - b.s || a.e - b.e);
@@ -307,16 +361,22 @@ async function fetchShow(id) {
     vote: d.vote_average || 0, votes: d.vote_count || 0, pop: d.popularity || 0, over: (d.overview || '').slice(0, 400), genreIds: (d.genres || []).map(g => g.id),
     imdbRating, cast: [...creators, ...cast].slice(0, 14), recs: recs.slice(0, 20),
     seasonNames: Object.fromEntries(seasons.map(s => [s.season_number, s.name])),
-    eps, fetched: Date.now(), added: state.shows[id] ? state.shows[id].added : Date.now(), archived: state.shows[id] ? !!state.shows[id].archived : false,
+    eps, fetched: Date.now(), added: state.shows[id] ? state.shows[id].added : Date.now(), archived: state.shows[id] ? !!state.shows[id].archived : false, rating: state.shows[id] && state.shows[id].rating || 0,
   };
 }
-async function addShow(id) {
+async function addShow(id, quiet) {
   toast('Loading show…');
   try {
     const show = previewShows[id] && !previewShows[id].error ? previewShows[id] : await fetchShow(id); delete previewShows[id];
     state.shows[id] = show; if (!state.order.includes(id)) state.order.push(id); state.watched[id] = state.watched[id] || {};
-    save(); toast(`Added ${show.name}`); render();
-  } catch (e) { toast('Error: ' + e.message); }
+    save(); toast(`Added ${show.name}`); if (!quiet) render(); return true;
+  } catch (e) { toast('Error: ' + e.message); return false; }
+}
+// a show opened before being added: adopt the already-loaded preview data without a network call
+function ensureTracked(id) {
+  if (state.shows[id]) return true;
+  const pv = previewShows[id]; if (!pv || pv.error) return false;
+  state.shows[id] = pv; delete previewShows[id]; if (!state.order.includes(id)) state.order.push(id); state.watched[id] = state.watched[id] || {}; toast(`Added ${pv.name} to your shows`); return true;
 }
 /* ============ movies ============ */
 const slimM = r => ({ id: r.id, name: r.title || r.name, poster: r.poster_path || null, year: (r.release_date || '').slice(0, 4), release: r.release_date || null, vote: r.vote_average || 0, votes: r.vote_count || 0, pop: r.popularity || 0, over: (r.overview || '').slice(0, 160), genreIds: r.genre_ids || [] });
@@ -338,12 +398,12 @@ async function fetchMovie(id) {
     over: (d.overview || '').slice(0, 600), tagline: d.tagline || '', imdb, imdbRating: await fetchImdbRating(imdb), status: d.status || '',
     providers: { stream: pick('flatrate').concat(pick('free'), pick('ads')), rent: pick('rent').concat(pick('buy')), region: state.region },
     cast: [...crew, ...cast].slice(0, 12), recs: recs.slice(0, 20), fetched: Date.now(),
-    list: old.list || 'want', added: old.added || Date.now(), watchedAt: old.watchedAt || null };
+    list: old.list || 'want', added: old.added || Date.now(), watchedAt: old.watchedAt || null, rating: old.rating || 0 };
 }
-async function addMovie(id, list) {
+async function addMovie(id, list, quiet) {
   toast('Loading movie…');
-  try { const m = previewMovies[id] && !previewMovies[id].error ? previewMovies[id] : await fetchMovie(id); delete previewMovies[id]; m.list = list; if (list === 'seen') m.watchedAt = m.watchedAt || Date.now(); state.movies[id] = m; save(); toast(list === 'seen' ? `Marked ${m.name} as watched` : `${m.name} added to your watchlist`); render(); }
-  catch (e) { toast('Error: ' + e.message); }
+  try { const m = previewMovies[id] && !previewMovies[id].error ? previewMovies[id] : await fetchMovie(id); delete previewMovies[id]; m.list = list; if (list === 'seen') m.watchedAt = m.watchedAt || Date.now(); state.movies[id] = m; save(); toast(list === 'seen' ? `Marked ${m.name} as watched` : `${m.name} added to your watchlist`); if (!quiet) render(); return true; }
+  catch (e) { toast('Error: ' + e.message); return false; }
 }
 function setMovieList(id, list) { const m = state.movies[id]; if (!m) return; m.list = list; if (list === 'seen' && !m.watchedAt) m.watchedAt = Date.now(); if (list === 'want') m.watchedAt = null; save(); render(); }
 // pools of popular titles used to pad suggestion rows to a full 6 or 12
@@ -359,13 +419,20 @@ async function loadPools() {
   } catch (e) {}
 }
 function fill(list, pools, exclude) {
-  // Always return 6 or 12 items when enough material exists
-  const target = list.length >= 12 ? 12 : 6; const out = list.slice(0, target); const ids = new Set(out.map(x => x.id));
-  for (const pool of pools) for (const r of pool) { if (out.length >= target) break; if (ids.has(r.id) || exclude(r.id)) continue; ids.add(r.id); out.push({ ...r, pad: true }); }
+  // Always return 6 or 12 visible items when enough material exists, plus up to 6 hidden spares that slide in when a card is added or dismissed
+  const target = list.length >= 12 ? 12 : 6; const out = list.slice(0, target + 6); const ids = new Set(out.map(x => x.id));
+  for (const pool of pools) for (const r of pool) { if (out.length >= target + 6) break; if (ids.has(r.id) || exclude(r.id)) continue; ids.add(r.id); out.push({ ...r, pad: true }); }
+  out.forEach((x, i) => { if (i >= target) x.spare = true; });
   return out;
 }
+// remove a suggestion card and reveal the next spare in the same row
+function swapCard(card) {
+  if (!card) return; const grid = card.parentElement; card.remove();
+  const spare = grid && grid.querySelector('.card.rec[hidden]'); if (spare) spare.hidden = false;
+  if (grid && !grid.querySelector('.card.rec')) { const panel = grid.closest('.panel'); if (panel) panel.remove(); }
+}
 async function refreshShow(id, quiet) {
-  try { const old = state.shows[id]; const fresh = await fetchShow(id); fresh.added = old.added; fresh.archived = old.archived; state.shows[id] = fresh; save(); if (!quiet) toast(`Refreshed ${fresh.name}`); }
+  try { const old = state.shows[id]; const fresh = await fetchShow(id); fresh.added = old.added; fresh.archived = old.archived; fresh.rating = old.rating || 0; state.shows[id] = fresh; save(); if (!quiet) toast(`Refreshed ${fresh.name}`); }
   catch (e) { if (!quiet) toast('Refresh failed: ' + e.message); }
 }
 async function refreshAll(force) {
@@ -389,6 +456,7 @@ function render() {
   if (!user) { app.innerHTML = loginHTML(); bindLogin(); return; }
   if (!CFG.API && !state.apiKey && view.name !== 'settings') { app.innerHTML = setupHTML(); bindSetup(); return; }
   // context: movies section searches movies, everything else searches shows; people search is filtered the same way
+  const prevMode = searchMode;
   const ctx = view.name === 'person' ? (lastCtx || 'tv') : ['movies', 'movie'].includes(view.name) ? 'movie' : 'tv';
   if (ctx !== lastCtx) { searchMode = ctx; lastCtx = ctx; }
   // keep scroll position, the query and the results across re-renders so several items can be ticked in a row
@@ -396,6 +464,8 @@ function render() {
   app.innerHTML = searchHTML() + ({ home: homeHTML, calendar: calendarHTML, shows: showsHTML, show: showHTML, settings: settingsHTML, person: personHTML, episode: episodeHTML, movies: moviesHTML, movie: movieHTML, space: spaceHTML, friends: friendsHTML, member: memberHTML }[view.name])();
   bindSearch(); bindCommon();
   if (!navigated && q) { $('#q').value = q; $('#results').innerHTML = res; refreshResultButtons($('#results')); bindResultButtons($('#results')); }
+  // moving between sections (Shows → Movies → a person page…) keeps what you typed and searches it again in the new context
+  else if (navigated && q && q.trim().length >= 2 && !['show', 'episode', 'movie'].includes(view.name)) { $('#q').value = q; if (searchMode === prevMode) { $('#results').innerHTML = res; refreshResultButtons($('#results')); bindResultButtons($('#results')); } else $('#q').dispatchEvent(new Event('input')); }
   if (!navigated) requestAnimationFrame(() => window.scrollTo(0, y));
   navigated = false;
   if (view.name === 'person') loadPerson();
@@ -472,7 +542,7 @@ function showResultRow(r, why) {
 function bindResultButtons(box) {
   box.querySelectorAll('[data-add]').forEach(b => b.onclick = () => addShow(+b.dataset.add));
   box.querySelectorAll('[data-open]').forEach(b => b.onclick = () => go('show', +b.dataset.open));
-  box.querySelectorAll('[data-person]').forEach(b => b.onclick = () => go('person', { id: +b.dataset.person, name: b.dataset.name }));
+  box.querySelectorAll('[data-person]').forEach(b => b.onclick = e => { e.preventDefault(); go('person', { id: +b.dataset.person, name: b.dataset.name }); });
   box.querySelectorAll('[data-mwant]').forEach(b => b.onclick = () => addMovie(+b.dataset.mwant, 'want'));
   box.querySelectorAll('[data-mseen]').forEach(b => b.onclick = () => addMovie(+b.dataset.mseen, 'seen'));
   box.querySelectorAll('[data-mopen]').forEach(b => b.onclick = e => { e.preventDefault(); go('movie', +b.dataset.mopen); });
@@ -480,7 +550,7 @@ function bindResultButtons(box) {
 }
 function bindSearch() {
   const q = $('#q'); let t;
-  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { searchMode = b.dataset.mode; navigated = true; render(); $('#q').focus(); });
+  document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { const typed = $('#q').value; searchMode = b.dataset.mode; navigated = true; render(); const q2 = $('#q'); q2.value = typed; q2.focus(); if (typed.trim().length >= 2) q2.dispatchEvent(new Event('input')); });
   const run = async () => {
     const term = q.value.trim(); const box = $('#results');
     if (term.length < 2) { box.innerHTML = ''; return; }
@@ -501,9 +571,9 @@ function bindSearch() {
         const list = (d.results || []).filter(p => p.known_for_department !== 'Sound').slice(0, 8);
         if (!list.length) { box.innerHTML = '<div class="panel muted">No results</div>'; return; }
         box.innerHTML = `<div class="panel"><h2>People</h2>${list.map(p => `<div class="row">
-          ${p.profile_path ? `<img class="poster" src="${IMG}w92${p.profile_path}" alt="" style="border-radius:50%;width:48px;height:48px">` : '<div class="poster" style="border-radius:50%;width:48px;height:48px"></div>'}
-          <div class="grow"><div class="title">${esc(p.name)}</div><div class="sub">${esc(p.known_for_department || '')}${(p.known_for || []).length ? ' · ' + esc(p.known_for.map(k => k.name || k.title).join(', ')) : ''}</div></div>
-          <button class="small primary" data-person="${p.id}" data-name="${esc(p.name)}">${lastCtx === 'movie' ? 'See movies' : 'See shows'}</button></div>`).join('')}</div>`;
+          ${p.profile_path ? `<img class="poster" src="${IMG}w92${p.profile_path}" alt="" data-person="${p.id}" data-name="${esc(p.name)}" style="border-radius:50%;width:48px;height:48px;cursor:pointer">` : '<div class="poster" style="border-radius:50%;width:48px;height:48px"></div>'}
+          <div class="grow"><div class="title"><a href="#" data-person="${p.id}" data-name="${esc(p.name)}" style="color:inherit;text-decoration:none">${esc(p.name)}</a></div><div class="sub">${esc(p.known_for_department || '')}${(p.known_for || []).length ? ' · ' + esc(p.known_for.map(k => k.name || k.title).join(', ')) : ''}</div></div>
+          <button class="small primary" data-person="${p.id}" data-name="${esc(p.name)}">Shows &amp; movies</button></div>`).join('')}</div>`;
       }
       bindResultButtons(box);
     } catch (e) { box.innerHTML = `<div class="panel muted">Search failed: ${esc(e.message)}</div>`; }
@@ -550,7 +620,7 @@ function suggestions() {
   const scores = {};
   for (const s of Object.values(state.shows)) {
     if (s.archived || !s.recs) continue;
-    const p = progress(s); const w = p.total ? Math.max(0.25, p.watched / p.total) : 0.5;
+    const p = progress(s); const w = (p.total ? Math.max(0.25, p.watched / p.total) : 0.5) * rateW(s.rating); if (!w) continue;
     s.recs.forEach((r, i) => { if (tracked.has(r.id) || dismissed.has(r.id)) return;
       const sc = scores[r.id] || (scores[r.id] = { r, score: 0, from: [] });
       sc.score += w * (1 - i / 40); if (!sc.from.includes(s.name)) sc.from.push(s.name); });
@@ -560,9 +630,13 @@ function suggestions() {
 }
 function movieSuggestions() {
   const dismissed = new Set(state.dismissedM); const scores = {};
-  for (const m of Object.values(state.movies)) { const w = m.list === 'seen' ? 1 : 0.6;
+  // genre taste: how much of what you've seen (weighted by your ratings) falls in each genre
+  const taste = {}; let tasteN = 0;
+  for (const m of Object.values(state.movies)) { if (m.list !== 'seen') continue; const w = rateW(m.rating); (m.genreIds || []).forEach(g => { taste[g] = (taste[g] || 0) + w; }); tasteN += w; }
+  const affinity = r => { const g = r.genreIds || []; if (!g.length || !tasteN) return 1; return 0.7 + Math.min(1, g.reduce((n, x) => n + (taste[x] || 0), 0) / tasteN); };
+  for (const m of Object.values(state.movies)) { const w = m.list === 'seen' ? rateW(m.rating) : 0.3; if (!w) continue;
     (m.recs || []).forEach((r, i) => { if (state.movies[r.id] || dismissed.has(r.id)) return; const sc = scores[r.id] || (scores[r.id] = { r, score: 0, from: [] }); sc.score += w * (1 - i / 40); if (!sc.from.includes(m.name)) sc.from.push(m.name); }); }
-  return Object.values(scores).map(x => ({ ...x.r, from: x.from, score: x.score * (0.6 + Math.min(x.r.vote, 9) / 15) })).sort((a, b) => b.score - a.score);
+  return Object.values(scores).map(x => ({ ...x.r, from: x.from, score: x.score * (0.6 + Math.min(x.r.vote, 9) / 15) * affinity(x.r) })).sort((a, b) => b.score - a.score);
 }
 const excludeTv = id => !!state.shows[id] || state.dismissed.includes(id);
 const excludeMov = id => !!state.movies[id] || state.dismissedM.includes(id);
@@ -572,12 +646,35 @@ function recCard(r, why, tag, kind) {
     ? (state.shows[r.id] ? `<button class="small" data-open="${r.id}" style="flex:1">Open</button>` : `<button class="small primary" data-add="${r.id}" style="flex:1">+ Add</button><button class="small ghost" data-dismiss="${r.id}" title="Not interested">✕</button>`)
     : (state.movies[r.id] ? `<button class="small" data-mopen="${r.id}" style="flex:1">Open</button>` : `<button class="small primary" data-mwant="${r.id}" style="flex:1" title="Add to watchlist">+ Want</button><button class="small" data-mseen="${r.id}" title="Mark as watched">✓</button><button class="small ghost" data-mdismiss="${r.id}" title="Not interested">✕</button>`);
   const m = kind === 'movie' && state.movies[r.id];
-  return `<div class="card rec" data-rec="${r.id}" ${kind === 'tv' ? `data-show="${r.id}"` : `data-mopen="${r.id}"`} title="${esc(r.over)}">
+  return `<div class="card rec" data-rec="${r.id}" ${kind === 'tv' ? `data-show="${r.id}"` : `data-mopen="${r.id}"`} title="${esc(r.over)}"${r.spare ? ' hidden' : ''}>
     <img src="${IMG}w342${r.poster}" alt="" loading="lazy">${r.vote ? `<span class="rt">★ ${(+r.vote).toFixed(1)}</span>` : ''}${m ? `<span class="tag ${m.list}">${m.list === 'seen' ? 'SEEN' : 'WANT'}</span>` : tag ? `<span class="tag">${tag}</span>` : ''}
     <div class="body"><div class="name">${esc(r.name)}</div><div class="sub">${r.year || (r.release ? r.release : '')}${kind === 'movie' && r.release && r.release > TODAY ? ` · ${relDay(r.release)}` : ''}</div>${why ? `<div class="why">${esc(why)}</div>` : ''}
     <div class="split" style="margin-top:6px">${btns}</div></div></div>`;
 }
 const gridSec = (title, list, fn, note) => list.length ? `<div class="panel"><h2>${title}</h2><div class="grid six">${list.map(fn).join('')}</div>${note ? `<p class="help" style="margin:10px 0 0">${note}</p>` : ''}</div>` : '';
+/* ============ ratings (1–10, stored on the show/movie record, synced with it) ============ */
+function starsHTML(kind, id, val, small) { return `<span class="stars${small ? ' sm' : ''}" data-rate="${kind}|${id}" title="${val ? 'Your rating: ' + val + '/10 — click to change' : 'Rate it (1–10)'}">${Array.from({ length: 10 }, (_, i) => `<span data-v="${i + 1}" class="${val && i < val ? 'on' : ''}">★</span>`).join('')}${val ? ` <b style="font-size:13px;margin-left:4px">${val}/10</b>` : ''}</span>`; }
+function bindStars(root) {
+  (root || document).querySelectorAll('[data-rate]').forEach(el => {
+    const [kind, id] = el.dataset.rate.split('|'); const stars = [...el.querySelectorAll('[data-v]')];
+    stars.forEach(st => { st.onmouseenter = () => stars.forEach(x => x.classList.toggle('hover', +x.dataset.v <= +st.dataset.v)); st.onmouseleave = () => stars.forEach(x => x.classList.remove('hover'));
+      st.onclick = e => { e.stopPropagation(); e.preventDefault(); const rec = kind === 'tv' ? state.shows[id] : state.movies[id]; if (!rec) { if (kind === 'tv' && !ensureTracked(+id)) return; else if (kind === 'movie') return; }
+        const target = kind === 'tv' ? state.shows[id] : state.movies[id]; const v = +st.dataset.v; target.rating = target.rating === v ? 0 : v; save(); toast(target.rating ? `Rated ${target.name} ${target.rating}/10` : 'Rating removed'); render(); }; });
+  });
+}
+// weight of an item's recommendations, from your rating (unrated = neutral)
+const rateW = r => !r ? 1 : r <= 3 ? 0 : r <= 5 ? 0.4 : r <= 7 ? 1 : r <= 8 ? 1.5 : 2;
+function rateSectionHTML() {
+  const shows = Object.values(state.shows).filter(s => !s.rating && !s.archived && progress(s).watched >= Math.max(3, Math.ceil(progress(s).total / 2)) ).slice(0, 12);
+  const movies = Object.values(state.movies).filter(m => m.list === 'seen' && !m.rating).sort((a, b) => (b.watchedAt || 0) - (a.watchedAt || 0)).slice(0, 12);
+  const rated = [...Object.values(state.shows).filter(s => s.rating).map(s => ({ ...s, kind: 'tv' })), ...Object.values(state.movies).filter(m => m.rating).map(m => ({ ...m, kind: 'movie' }))].sort((a, b) => b.rating - a.rating);
+  const item = (x, kind) => `<div class="row"><img class="poster" src="${IMG}w92${x.poster}" alt=""><div class="grow"><div class="title"><a href="#" ${kind === 'tv' ? `data-show="${x.id}"` : `data-mopen="${x.id}"`} style="color:inherit;text-decoration:none">${esc(x.name)}</a> <span class="muted" style="font-weight:400">${x.year || ''}</span></div>${starsHTML(kind, x.id, x.rating, true)}</div></div>`;
+  if (!shows.length && !movies.length && !rated.length) return '';
+  return `<div class="panel"><h2>Rate what you’ve watched</h2><p class="help">Your ratings sharpen the suggestions: what you love counts more, what you disliked is ignored.</p>
+    ${shows.length ? `<h3 style="margin:10px 0 4px">Shows</h3>${shows.map(x => item(x, 'tv')).join('')}` : ''}
+    ${movies.length ? `<h3 style="margin:10px 0 4px">Movies</h3>${movies.map(x => item(x, 'movie')).join('')}` : ''}
+    ${rated.length ? `<h3 style="margin:14px 0 4px">Your ratings (${rated.length})</h3>${rated.slice(0, 30).map(x => item(x, x.kind)).join('')}` : ''}</div>`;
+}
 function suggestionsHTML() {
   const { fresh, classics } = suggestions(); const P = state.pools || {};
   const why = x => x.pad ? (x.from ? '' : 'Popular right now') : 'Because you watch ' + x.from[0];
@@ -684,9 +781,13 @@ function showHTML() {
         <div class="meta" style="margin-top:4px"><span class="badge ${/Ended|Canceled/.test(s.status) ? 'ended' : ''}">${esc(s.status || '?')}</span>
           &nbsp; ${preview ? `${p.total} episodes aired` : `${p.watched}/${p.total} episodes watched`}${up ? ` · next episode ${relDay(up.air)} (${code(up.s, up.e)})` : ''}</div>
         ${s.over ? `<div class="help" style="margin-top:6px">${esc(s.over)}</div>` : ''}
+        ${preview ? '' : `<div class="meta" style="margin-top:6px">Your rating: ${starsHTML('tv', s.id, s.rating)}</div>`}
         ${preview ? '' : barHTML(s, p, 'max-width:320px')}
-        ${preview ? `<div class="actions"><button class="primary" data-add="${s.id}">+ Add to my shows</button>${s.imdb ? `<a class="small muted" style="align-self:center;font-size:13px" href="https://www.imdb.com/title/${s.imdb}/" target="_blank" rel="noopener">IMDb ↗</a>` : ''}</div>
-        <div class="help" style="margin-top:8px">Not in your shows yet — browse the episodes below, then add it to start tracking.</div>` : `<div class="actions">
+        ${preview ? `<div class="actions"><button class="primary" data-add="${s.id}">+ Add to my shows</button>
+          ${nx ? `<button class="small" data-season="${s.id}|${nx.s}|1" title="Adds the show and marks season ${nx.s} as watched">✓ Whole season ${nx.s}</button>` : ''}
+          ${p.total ? `<button class="small" data-allshow="${s.id}" title="Adds the show and marks every aired episode as watched">✓ Whole show</button>` : ''}
+          ${s.imdb ? `<a class="small muted" style="align-self:center;font-size:13px" href="https://www.imdb.com/title/${s.imdb}/" target="_blank" rel="noopener">IMDb ↗</a>` : ''}</div>
+        <div class="help" style="margin-top:8px">Not in your shows yet — ticking any episode below adds it automatically.</div>` : `<div class="actions">
           ${nx ? `<button class="primary small" data-watch="${s.id}|${nx.s}|${nx.e}">✓ Watched ${code(nx.s, nx.e)}</button>` : ''}
           ${nx ? `<button class="small" data-season="${s.id}|${nx.s}|1" title="Mark every aired episode of season ${nx.s} as watched">✓ Whole season ${nx.s}</button>` : ''}
           ${p.watched < p.total ? `<button class="small" data-allshow="${s.id}" title="Mark every aired episode as watched">✓ Whole show</button>` : ''}
@@ -701,9 +802,9 @@ function showHTML() {
     ${seasons.map(sn => { const eps = s.eps.filter(e => e.s === sn); const a = eps.filter(aired); const w = a.filter(e => isWatched(s.id, e.s, e.e)).length; const open = sn === openSeason;
       return `<div class="season">
         <div class="season-head" data-toggle="${sn}"><h3>${esc(s.seasonNames[sn] || 'Season ' + sn)} <span class="muted" style="font-weight:400;font-size:13px">${w}/${a.length}${eps.length > a.length ? ` · ${eps.length - a.length} upcoming` : ''}</span></h3>
-          ${a.length && !preview ? `<button class="small" data-season="${s.id}|${sn}|${w < a.length ? 1 : 0}">${w < a.length ? 'Mark all watched' : 'Unwatch all'}</button>` : ''}<span class="muted">${open ? '▾' : '▸'}</span></div>
+          ${a.length ? `<button class="small" data-season="${s.id}|${sn}|${w < a.length ? 1 : 0}">${w < a.length ? 'Mark all watched' : 'Unwatch all'}</button>` : ''}<span class="muted">${open ? '▾' : '▸'}</span></div>
         <div id="season-${sn}" ${open ? '' : 'hidden'}>${eps.map(ep => `<div class="ep ${aired(ep) ? '' : 'future'}">
-          ${preview ? '<div></div>' : `<div class="chk ${isWatched(s.id, ep.s, ep.e) ? 'on' : ''}" data-toggle-ep="${s.id}|${ep.s}|${ep.e}" role="checkbox" aria-checked="${isWatched(s.id, ep.s, ep.e)}">✓</div>`}
+          <div class="chk ${isWatched(s.id, ep.s, ep.e) ? 'on' : ''}" data-toggle-ep="${s.id}|${ep.s}|${ep.e}" role="checkbox" aria-checked="${isWatched(s.id, ep.s, ep.e)}">✓</div>
           <div class="num">${code(ep.s, ep.e).slice(3)}</div>
           <div class="n"><div class="t lnk" data-ep="${s.id}|${ep.s}|${ep.e}" title="Episode details">${esc(ep.name) || code(ep.s, ep.e)}</div></div>
           <div class="d">${ep.air ? (ep.air > TODAY ? relDay(ep.air) : fmtDate(ep.air, { day: 'numeric', month: 'short', year: 'numeric' })) : 'TBA'}${ep.at && ep.air >= TODAY ? ` ${localTime(ep.at)}` : ''}${ep.runtime ? ` · ${ep.runtime}m` : ''}</div>
@@ -801,9 +902,8 @@ function moviesHTML() {
   else if (moviesTab === 'seen') body = seen.length ? `<div class="grid">${seen.map(movieCard).join('')}</div>` : '<div class="empty">No movies marked as watched yet.</div>';
   else if (moviesTab === 'foryou') {
     const sug = movieSuggestions(); const list = fill(sug, [P.movPop || [], P.movTop || []], excludeMov);
-    const avail = want.filter(m => m.providers && m.providers.stream.length && !(m.release > TODAY));
-    body = (avail.length ? `<h2>From your watchlist, streaming now</h2><div class="grid">${avail.slice(0, 6).map(movieCard).join('')}</div>` : '')
-      + (list.length ? `<h2 style="margin-top:14px">Suggested for you</h2><div class="grid six">${list.map(r => recCard(r, r.pad ? 'Popular right now' : 'Because you liked ' + r.from[0], '', 'movie')).join('')}</div>` : '<div class="empty">Add or mark a few movies and suggestions will appear here.</div>');
+    const rated = Object.values(state.movies).filter(m => m.rating).length;
+    body = (list.length ? `<h2>Suggested for you</h2><div class="grid six">${list.map(r => recCard(r, r.pad ? 'Popular right now' : 'Because you liked ' + r.from[0], '', 'movie')).join('')}</div><p class="help" style="margin:10px 0 0">Based on the movies you’ve watched${rated ? ` and your ${rated} rating${rated > 1 ? 's' : ''}` : ''}, their genres and TMDB’s recommendations. Rate movies in My space to sharpen this.</p>` : '<div class="empty">Mark a few movies as watched and suggestions will appear here.</div>');
   } else {
     const mine = want.filter(m => m.release && m.release > TODAY).sort((a, b) => a.release.localeCompare(b.release));
     const pool = (P.movUp || []).filter(r => !state.movies[r.id] && !state.dismissedM.includes(r.id) && r.release && r.release >= TODAY).sort((a, b) => a.release.localeCompare(b.release));
@@ -827,7 +927,8 @@ function movieHTML() {
         <div class="meta" style="margin-top:4px">${ratingHTML(m.vote, m.votes, m.imdbRating)}</div>
         ${providersHTML(m)}
         <div class="meta" style="margin-top:4px">🎬 ${up ? `Releases ${fmtDate(rel, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}${m.localRelease && m.localRelease !== m.release ? ` in ${regionName()}` : ''} (${relDay(rel)})` : `Released ${m.release ? fmtDate(m.release, { day: 'numeric', month: 'long', year: 'numeric' }) : '—'}`}</div>
-        ${preview ? '' : `<div class="meta" style="margin-top:4px"><span class="badge ${m.list === 'seen' ? 'new' : ''}">${m.list === 'seen' ? 'Watched' + (m.watchedAt ? ' on ' + new Date(m.watchedAt).toLocaleDateString() : '') : 'On your watchlist'}</span></div>`}
+        ${preview ? '' : `<div class="meta" style="margin-top:4px"><span class="badge ${m.list === 'seen' ? 'new' : ''}">${m.list === 'seen' ? 'Watched' + (m.watchedAt ? ' on ' + new Date(m.watchedAt).toLocaleDateString() : '') : 'On your watchlist'}</span></div>
+        <div class="meta" style="margin-top:6px">Your rating: ${starsHTML('movie', m.id, m.rating)}</div>`}
         <div class="actions">
           ${preview ? `<button class="primary" data-mwant="${m.id}">+ Want to watch</button><button data-mseen="${m.id}">✓ Already seen</button>` : m.list === 'seen' ? `<button class="small" data-mlist="${m.id}|want">Move to watchlist</button>` : `<button class="small primary" data-mlist="${m.id}|seen">✓ Mark as watched</button>`}
           ${preview ? '' : `<button class="small" id="mrefresh">↻ Refresh</button><button class="small ghost" data-mremove="${m.id}">Remove</button>`}
@@ -846,20 +947,21 @@ function watchStats() {
   let eps = 0, mins = 0; const perShow = [], genreMins = {}, months = {};
   for (const s of Object.values(state.shows)) {
     const w = state.watched[s.id] || {}; const avg = avgRuntime(s); let sm = 0, se = 0;
-    for (const ep of s.eps) { const ts = w[epKey(ep.s, ep.e)]; if (!ts) continue; const r = ep.runtime || avg; se++; sm += r; const mk = new Date(ts).toISOString().slice(0, 7); months[mk] = (months[mk] || 0) + 1; }
+    for (const ep of s.eps) { const ts = w[epKey(ep.s, ep.e)]; if (!ts) continue; const r = ep.runtime || avg; se++; sm += r; const mk = monthKey(ts); months[mk] = (months[mk] || 0) + 1; }
     if (se) { perShow.push({ s, eps: se, mins: sm, done: progress(s).watched === progress(s).total && !s.inProd && /Ended|Canceled/.test(s.status) }); eps += se; mins += sm; (s.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + sm); }
   }
   const movies = Object.values(state.movies).filter(m => m.list === 'seen'); let mmins = 0;
-  for (const m of movies) { mmins += m.runtime || 110; (m.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + (m.runtime || 110)); if (m.watchedAt) { const mk = new Date(m.watchedAt).toISOString().slice(0, 7); months[mk] = (months[mk] || 0) + 1; } }
+  for (const m of movies) { mmins += m.runtime || 110; (m.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + (m.runtime || 110)); if (m.watchedAt) { const mk = monthKey(m.watchedAt); months[mk] = (months[mk] || 0) + 1; } }
   perShow.sort((a, b) => b.mins - a.mins);
   return { eps, mins, perShow, movies: movies.length, mmins, genres: Object.entries(genreMins).sort((a, b) => b[1] - a[1]).slice(0, 8), months };
 }
+const monthKey = ts => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); };
 const fmtDur = mins => { const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), m = mins % 60; return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; };
 function spaceHTML() {
   const st = watchStats(); const total = st.mins + st.mmins; const shows = Object.values(state.shows);
   const completed = shows.filter(s => { const p = progress(s); return p.total && p.watched === p.total && /Ended|Canceled/.test(s.status); }).length;
   const caught = shows.filter(s => !s.archived && !nextToWatch(s)).length;
-  const now = new Date(); const mk = []; for (let i = 11; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); mk.push([d.toISOString().slice(0, 7), d.toLocaleDateString(undefined, { month: 'short' })]); }
+  const now = new Date(); const mk = []; for (let i = 11; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); mk.push([monthKey(d), d.toLocaleDateString(undefined, { month: 'short' })]); }
   const maxM = Math.max(1, ...mk.map(([k]) => st.months[k] || 0)); const maxG = st.genres.length ? st.genres[0][1] : 1;
   const nothing = !shows.length && !Object.keys(state.movies).length;
   return `<div class="panel"><h2>My space</h2>
@@ -870,6 +972,7 @@ function spaceHTML() {
       <div class="stat"><div class="big">${st.movies}</div><div class="lbl">movies watched · ${Object.values(state.movies).filter(m => m.list === 'want').length} on watchlist</div></div>
     </div>`}
   </div>
+  ${rateSectionHTML()}
   ${st.perShow.length ? `<div class="panel"><h2>Key shows · by time spent</h2><div class="grid six">${st.perShow.slice(0, st.perShow.length >= 12 ? 12 : 6).map(({ s, eps, mins }) => `<div class="card" data-show="${s.id}">
       ${s.poster ? `<img src="${IMG}w342${s.poster}" alt="" loading="lazy">` : '<div style="aspect-ratio:2/3;background:var(--panel-2)"></div>'}
       <div class="body"><div class="name">${esc(s.name)}</div><div class="sub">${fmtDur(mins)} · ${eps} ep</div><div class="bar"><i style="width:${Math.round(100 * mins / st.perShow[0].mins)}%"></i></div></div></div>`).join('')}</div></div>` : ''}
@@ -887,13 +990,19 @@ function settingsHTML() {
     <div class="kv" style="margin-top:14px"><label>Username</label><div><input type="text" id="username" value="${esc(profile ? profile.username : '')}" maxlength="24" placeholder="3–24 letters, digits, _"><div class="help" style="margin-top:4px">Friends find you by username. Your profile link: <b>${location.origin}/#u/${esc(profile ? profile.username : '')}</b></div></div></div>
     <div class="kv"><label>Display name</label><input type="text" id="displayName" value="${esc(profile ? profile.display_name || '' : '')}" maxlength="40"></div>
     <div class="kv"><label>Profile visibility</label><div><label style="color:var(--text)"><input type="checkbox" id="isPublic" ${profile && profile.is_public ? 'checked' : ''}> Public — members can see my lists and follow me</label><div class="help" style="margin-top:4px">Private means nobody sees your lists, and friends' suggestions won't include you.</div></div></div>
+    <div class="split"><button class="primary" id="saveProfile">Save profile</button></div>
+  </div>
+  <div class="panel"><h2>My subscriptions</h2>
+    <p class="help">Tick the services you pay for. They’re highlighted on every show and movie, and “What should I watch” puts titles you can stream right now first.</p>
+    <div id="subsBox" class="split" style="gap:6px">${subsHTML()}</div>
+    <div class="split" style="margin-top:10px"><button class="primary" id="saveSubs">Save subscriptions</button></div>
   </div>
   <div class="panel"><h2>Settings</h2>
     ${CFG.API ? '' : `<div class="kv"><label>TMDB API key</label><input type="password" id="key" value="${esc(state.apiKey)}" placeholder="API key or read access token"></div>
     <div class="kv"><label>OMDb API key <span class="help">(optional, for IMDb ratings)</span></label><div><input type="password" id="omdb" value="${esc(state.omdbKey || '')}" placeholder="Free key from omdbapi.com/apikey.aspx"></div></div>`}
     <div class="kv"><label>Streaming region</label><div><select id="region">${REGIONS.map(([c, n]) => `<option value="${c}" ${c === state.region ? 'selected' : ''}>${n}</option>`).join('')}</select><div class="help" style="margin-top:4px">Which country’s catalogue to use for “where to watch” (data from JustWatch via TMDB). Refresh all shows after changing it.</div></div></div>
     <div class="kv"><label>Language</label><select id="lang">${['en-US', 'fr-FR', 'ar-TN', 'de-DE', 'es-ES', 'it-IT'].map(l => `<option ${l === state.lang ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
-    <div class="split"><button class="primary" id="saveSettings">Save</button><button id="refreshAll">↻ Refresh all shows now</button></div>
+    <div class="split"><button class="primary" id="saveSettings">Save settings</button><button id="refreshAll">↻ Refresh all shows now</button></div>
     <p class="help">Shows are refreshed automatically when you open the app if their data is older than 20 hours.</p>
   </div>
   <div class="panel"><h2>Your data</h2>
@@ -901,25 +1010,53 @@ function settingsHTML() {
     <div class="split"><button id="export">⬇ Export backup (JSON)</button><button id="import">⬆ Import a backup / old TVShowManiacs file</button><button id="ics2">📅 Export calendar (.ics)</button><button id="undismiss">Reset hidden suggestions${(state.dismissed.length + state.dismissedM.length) ? ` (${state.dismissed.length + state.dismissedM.length})` : ''}</button></div>
     <div class="split" style="margin-top:10px"><button class="ghost" id="wipe">Delete all my lists</button><button class="ghost" id="deleteAccount" style="color:var(--warn)">Delete my account</button></div>
     <input type="file" id="file" accept="application/json" hidden>
+    <div id="dataCheck" class="help" style="margin-top:10px">Checking your account…</div>
+    <h3 style="margin:14px 0 6px">Automatic backups</h3>
+    <p class="help">A snapshot of your lists is kept in this browser every day (and before anything is cleaned up). Restore one if something ever goes missing — restoring only adds what is absent, it never removes.</p>
+    <div id="backups" class="help">Loading…</div>
+    <div class="split" style="margin-top:8px"><button id="backupNow">Back up now</button></div>
+    <h3 style="margin:14px 0 6px">Sync diary</h3>
+    <div id="syncLog" class="help" style="max-height:160px;overflow:auto">${syncLogHTML()}</div>
   </div>
   <div class="panel"><h2>Calendar reminders</h2>
     <div class="help">The .ics file contains one event per upcoming episode (next 90 days): at the exact release/broadcast time in your timezone when it’s known (reminder at that moment), otherwise all-day with a reminder at 20:00. The platform is noted in the event. Import it into Google Calendar or Apple Calendar to get notifications. It’s a snapshot, so re-export when you add shows or every few weeks.</div>
   </div>`;
 }
 
+async function listBackups() {
+  const el = $('#backups'); if (!el) return;
+  try { const rows = (await idb.all()).filter(b => !user || user.id === 'local' || b.uid === user.id || b.reason === 'storage full').sort((a, b) => b.ts - a.ts);
+    el.innerHTML = rows.length ? rows.map(b => `<div class="split" style="align-items:center;margin:4px 0"><span>${new Date(b.ts).toLocaleString()} — ${b.shows} shows, ${b.movies} movies, ${b.ticks} episodes <span class="muted">(${esc(b.reason)})</span></span><button class="ghost" data-restore="${esc(b.key)}">Restore</button></div>`).join('') : 'No backups yet.';
+    el.querySelectorAll('[data-restore]').forEach(btn => btn.onclick = async () => { const b = rows.find(x => x.key === btn.dataset.restore); if (!b || !confirm(`Add the ${b.shows} shows and ${b.movies} movies from this backup to your lists?`)) return; mergeImport(JSON.parse(b.json)); save(true); toast('Restored — syncing to your account'); render(); });
+  } catch (e) { el.textContent = 'Backups are not available in this browser (' + (e.message || e) + ').'; }
+}
+async function checkAccount() {
+  const el = $('#dataCheck'); if (!el) return; if (!sb || !user || user.id === 'local') { el.textContent = ''; return; }
+  try { const cnt = async t => { const r = await sb.from(t).select('*', { count: 'exact', head: true }).eq('user_id', user.id); if (r.error) throw r.error; return r.count || 0; };
+    const [sh, mv, ep] = await Promise.all([cnt('user_shows'), cnt('user_movies'), cnt('watched_episodes')]);
+    const ls = Object.keys(state.shows).length, lm = Object.keys(state.movies).length, le = Object.values(state.watched).reduce((n, v) => n + Object.keys(v || {}).length, 0);
+    const ok = sh >= ls && mv >= lm && ep >= le;
+    el.innerHTML = `In your account: <b>${sh}</b> shows, <b>${mv}</b> movies, <b>${ep}</b> ticked episodes — ${ok ? '✓ everything here is saved' : `⚠ this browser has more (${ls}/${lm}/${le}); <a href="#" id="pushAll">save it to your account now</a>`}`;
+    const p = $('#pushAll'); if (p) p.onclick = e => { e.preventDefault(); synced = null; save(true); toast('Saving everything…'); setTimeout(checkAccount, 4000); };
+  } catch (e) { el.textContent = 'Could not check your account: ' + (e.message || e); }
+}
 /* ============ bindings ============ */
 function bindCommon() {
+  bindStars();
   document.querySelectorAll('[data-show]').forEach(el => el.onclick = e => { e.preventDefault(); go('show', +el.dataset.show); });
-  document.querySelectorAll('[data-watch]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = b.dataset.watch.split('|').map(Number); setWatched(id, s, ep, true); render(); });
-  document.querySelectorAll('[data-toggle-ep]').forEach(b => b.onclick = () => { const [id, s, ep] = b.dataset.toggleEp.split('|').map(Number); setWatched(id, s, ep, !isWatched(id, s, ep)); render(); });
-  document.querySelectorAll('[data-season]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, sn, on] = b.dataset.season.split('|').map(Number); state.shows[id].eps.filter(ep => ep.s === sn && aired(ep)).forEach(ep => setWatched(id, ep.s, ep.e, !!on, true)); save(); render(); });
-  document.querySelectorAll('[data-allshow]').forEach(b => b.onclick = () => { const id = +b.dataset.allshow; if (!confirm('Mark every aired episode as watched?')) return; state.shows[id].eps.filter(aired).forEach(ep => setWatched(id, ep.s, ep.e, true, true)); save(); render(); });
-  document.querySelectorAll('#app [data-dismiss]').forEach(b => b.onclick = e => { e.stopPropagation(); state.dismissed = state.dismissed || []; state.dismissed.push(+b.dataset.dismiss); save(); render(); });
-  document.querySelectorAll('#app .card.rec [data-add], #app .card.rec [data-open], #app .person[data-person]').forEach(b => b.onclick = e => { e.stopPropagation();
-    if (b.dataset.add) addShow(+b.dataset.add); else if (b.dataset.open) go('show', +b.dataset.open); else go('person', { id: +b.dataset.person, name: b.dataset.name }); });
-  document.querySelectorAll('#app .card.rec [data-mwant], #app .card.rec [data-mseen], #app .card.rec [data-mopen], #app .card.rec [data-mdismiss]').forEach(b => b.onclick = e => { e.stopPropagation();
-    if (b.dataset.mwant) addMovie(+b.dataset.mwant, 'want'); else if (b.dataset.mseen) addMovie(+b.dataset.mseen, 'seen'); else if (b.dataset.mopen) go('movie', +b.dataset.mopen);
-    else { state.dismissedM.push(+b.dataset.mdismiss); save(); render(); } });
+  document.querySelectorAll('[data-watch]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = b.dataset.watch.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, true); render(); });
+  document.querySelectorAll('[data-toggle-ep]').forEach(b => b.onclick = () => { const [id, s, ep] = b.dataset.toggleEp.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, !isWatched(id, s, ep)); render(); });
+  document.querySelectorAll('[data-season]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, sn, on] = b.dataset.season.split('|').map(Number); if (!ensureTracked(id)) return; state.shows[id].eps.filter(ep => ep.s === sn && aired(ep)).forEach(ep => setWatched(id, ep.s, ep.e, !!on, true)); save(true); render(); });
+  document.querySelectorAll('[data-allshow]').forEach(b => b.onclick = () => { const id = +b.dataset.allshow; if (!confirm('Mark every aired episode as watched?')) return; if (!ensureTracked(id)) return; state.shows[id].eps.filter(aired).forEach(ep => setWatched(id, ep.s, ep.e, true, true)); save(true); render(); });
+  document.querySelectorAll('#app [data-dismiss]').forEach(b => b.onclick = e => { e.stopPropagation(); state.dismissed = state.dismissed || []; state.dismissed.push(+b.dataset.dismiss); save(); swapCard(b.closest('.card.rec')); });
+  document.querySelectorAll('#app .card.rec [data-add], #app .card.rec [data-open], #app .person[data-person]').forEach(b => b.onclick = async e => { e.stopPropagation();
+    if (b.dataset.add) { b.disabled = true; b.textContent = 'Adding…'; const card = b.closest('.card.rec'); if (await addShow(+b.dataset.add, true)) swapCard(card); else { b.disabled = false; b.textContent = '+ Add'; } }
+    else if (b.dataset.open) go('show', +b.dataset.open); else go('person', { id: +b.dataset.person, name: b.dataset.name }); });
+  document.querySelectorAll('#app .card.rec [data-mwant], #app .card.rec [data-mseen], #app .card.rec [data-mopen], #app .card.rec [data-mdismiss]').forEach(b => b.onclick = async e => { e.stopPropagation();
+    const card = b.closest('.card.rec');
+    if (b.dataset.mwant || b.dataset.mseen) { const id = +(b.dataset.mwant || b.dataset.mseen); card.querySelectorAll('button').forEach(x => x.disabled = true); if (await addMovie(id, b.dataset.mwant ? 'want' : 'seen', true)) swapCard(card); else card.querySelectorAll('button').forEach(x => x.disabled = false); }
+    else if (b.dataset.mopen) go('movie', +b.dataset.mopen);
+    else { state.dismissedM.push(+b.dataset.mdismiss); save(); swapCard(card); } });
   document.querySelectorAll('#app .card[data-mopen]').forEach(c => c.onclick = () => go('movie', +c.dataset.mopen));
   document.querySelectorAll('#app .detail-head [data-add], #app .detail-head [data-mwant], #app .detail-head [data-mseen], #app .actions [data-add]').forEach(b => b.onclick = () => {
     if (b.dataset.add) addShow(+b.dataset.add); else if (b.dataset.mwant) addMovie(+b.dataset.mwant, 'want'); else addMovie(+b.dataset.mseen, 'seen'); });
@@ -939,9 +1076,12 @@ function bindCommon() {
   }
   if ($('#ics')) $('#ics').onclick = exportICS;
   if (view.name === 'settings') {
-    $('#saveSettings').onclick = async () => {
+    $('#saveSettings').onclick = () => {
       if ($('#key')) { state.apiKey = $('#key').value.trim(); state.omdbKey = $('#omdb').value.trim(); }
-      state.lang = $('#lang').value; state.region = $('#region').value;
+      const regionChanged = state.region !== $('#region').value;
+      state.lang = $('#lang').value; state.region = $('#region').value; save(); toast('Saved'); if (regionChanged) { state.provList = null; state.pools = null; render(); } };
+    $('#saveSubs').onclick = () => { state.subs = [...document.querySelectorAll('#subsBox input:checked')].map(i => i.value); save(); toast(state.subs.length ? `Saved ${state.subs.length} subscription${state.subs.length > 1 ? 's' : ''}` : 'No subscriptions selected'); render(); };
+    $('#saveProfile').onclick = async () => {
       const patch = { username: $('#username').value.trim().toLowerCase(), display_name: $('#displayName').value.trim(), is_public: $('#isPublic').checked };
       if (!/^[a-z0-9_]{3,24}$/.test(patch.username)) return toast('Username: 3–24 lowercase letters, digits or _');
       save();
@@ -957,6 +1097,8 @@ function bindCommon() {
     $('#ics2').onclick = exportICS;
     $('#undismiss').onclick = () => { state.dismissed = []; state.dismissedM = []; save(); toast('Hidden suggestions will show again'); render(); };
     $('#import').onclick = () => $('#file').click();
+    $('#backupNow').onclick = async () => { await backupNow('manual'); toast('Backup saved'); listBackups(); };
+    listBackups(); checkAccount();
     $('#file').onchange = ev => { const f = ev.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const d = JSON.parse(r.result); if (!d.shows) throw 0; mergeImport(d); save(); toast('Imported — syncing to your account'); go('home'); } catch (e) { toast('Not a valid backup file'); } }; r.readAsText(f); };
     $('#wipe').onclick = () => { if (confirm('Delete all your shows, movies and progress from your account?')) { const keep = { apiKey: state.apiKey, omdbKey: state.omdbKey, lang: state.lang, region: state.region }; state = Object.assign(blank(), keep); save(); render(); } };
   }
@@ -1058,10 +1200,10 @@ function memberHTML() {
 async function loadMember() {
   const uname = view.arg; memberData = { username: uname, loading: true }; const { data: p } = await sb.from('profiles').select('id,username,display_name,avatar_url,is_public').eq('username', uname).maybeSingle();
   if (!p) { memberData = { username: uname, missing: true }; if (view.name === 'member') render(); return; }
-  const [shows, watched, movies, stats] = await Promise.all([
+  const [shows, movies, stats] = await Promise.all([
     sb.from('user_shows').select('show_id,data,archived').eq('user_id', p.id).order('added_at', { ascending: false }),
-    sb.from('watched_episodes').select('show_id').eq('user_id', p.id), sb.from('user_movies').select('movie_id,data,list').eq('user_id', p.id).order('added_at', { ascending: false }), sb.rpc('profile_stats', { uid: p.id })]);
-  const wc = {}; (watched.data || []).forEach(r => wc[r.show_id] = (wc[r.show_id] || 0) + 1);
+    sb.from('user_movies').select('movie_id,data,list').eq('user_id', p.id).order('added_at', { ascending: false }), sb.rpc('profile_stats', { uid: p.id })]);
+  const wc = {}; for (let from = 0; ; from += 1000) { const r = await sb.from('watched_episodes').select('show_id').eq('user_id', p.id).order('show_id').order('season').order('episode').range(from, from + 999); (r.data || []).forEach(x => wc[x.show_id] = (wc[x.show_id] || 0) + 1); if (!r.data || r.data.length < 1000) break; }
   const slimRow = r => ({ show_id: r.show_id, archived: r.archived, data: { name: r.data.name, poster: r.data.poster, year: r.data.year, vote: r.data.vote }, watched: wc[r.show_id] || 0, total: (r.data.eps || []).filter(e => e.air && e.air <= TODAY).length });
   memberData = { username: uname, profile: p, shows: (shows.data || []).map(slimRow), movies: (movies.data || []).map(r => ({ movie_id: r.movie_id, list: r.list, data: { name: r.data.name, poster: r.data.poster, year: r.data.year, vote: r.data.vote } })), stats: stats.data && stats.data[0] };
   if (!friendsData.following.length) await loadFriends();
@@ -1083,7 +1225,10 @@ function mergeImport(d) {
 }
 
 /* ============ auth + sync (Supabase) ============ */
-const sb = (CFG.SUPABASE_URL && window.supabase) ? window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON) : null;
+// keepalive lets small writes (ticks, profile) finish even if the tab is closed right after; bodies over ~60 KB (show data) can't use it
+const keepFetch = (url, opts) => { const u = String(url); const small = /\/rest\/v1\/(watched_episodes|profiles|follows|user_movies)/.test(u) && (!opts || !opts.body || String(opts.body).length < 60000); return fetch(url, small ? { ...opts, keepalive: true } : opts); };
+tidyStorage(false);
+const sb = (CFG.SUPABASE_URL && window.supabase) ? window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON, { global: { fetch: keepFetch } }) : null;
 function loginHTML() {
   return `<div class="panel setup">
     <h2>TVShowManiacs</h2>
@@ -1091,7 +1236,7 @@ function loginHTML() {
     ${sb ? `<button class="primary" id="googleLogin" style="padding:10px 18px">Continue with Google</button>
     <div class="help" style="margin:14px 0 6px">or get a sign-in link by e-mail</div>
     <div class="split" style="justify-content:center"><input type="text" id="emailLogin" placeholder="you@example.com" style="max-width:280px" autocomplete="email"><button id="emailGo">Send link</button></div>
-    <div id="loginMsg" class="help" style="margin-top:10px"></div>`
+    <div id="loginMsg" class="help" style="margin-top:10px">${loginStatus ? esc(loginStatus) : ''}</div>`
     : `<div class="help">Sign-in is not configured yet (SUPABASE_URL missing in config.js).</div>`}
     <p class="help" style="margin-top:22px">Free, no ads. <a href="/privacy.html">Privacy &amp; credits</a></p>
   </div>`;
@@ -1102,29 +1247,54 @@ function bindLogin() {
   $('#emailGo').onclick = async () => { const email = $('#emailLogin').value.trim(); if (!email) return; const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + '/' } }); $('#loginMsg').textContent = error ? error.message : 'Check your inbox for the sign-in link.'; };
   $('#emailLogin').onkeydown = e => { if (e.key === 'Enter') $('#emailGo').click(); };
 }
+let loginStatus = '';   // shown on the login panel: what sign-in is doing, or why it failed
+function setLoginStatus(t) { loginStatus = t || ''; const el = $('#loginMsg'); if (el) el.textContent = loginStatus; }
 async function forceSignOut(msg) {
   try { await sb.auth.signOut(); } catch (e) {}
-  try { Object.keys(localStorage).filter(k => k.startsWith('tvsm.cache.')).forEach(k => localStorage.removeItem(k)); } catch (e) {}
-  user = null; profile = null; state = blank(); navigated = true; render(); if (msg) toast(msg);
+  try { Object.keys(localStorage).filter(k => k.startsWith('tvsm.cache.') || k.startsWith('tvsm.synced.')).forEach(k => localStorage.removeItem(k)); } catch (e) {}
+  user = null; profile = null; state = blank(); navigated = true; loginStatus = msg || ''; render(); if (msg) toast(msg);
 }
-async function onSignedIn(u) {
-  // Make sure the account still exists on the server (a cached session survives the user being deleted in Supabase)
+// Sign-in runs once at a time: the session check at boot and the SIGNED_IN event both call this within milliseconds.
+let signingIn = null;
+function onSignedIn(u) {
+  if (user || signingIn) return signingIn;
+  signingIn = onSignedIn0(u).catch(e => {
+    console.error('sign-in failed', e);
+    if (user) { navigated = true; render(); toast('Signed in, but part of your data could not be loaded: ' + (e.message || e)); }
+    else setLoginStatus('Sign-in failed: ' + (e.message || e) + ' — please try again.');
+  }).finally(() => { signingIn = null; });
+  return signingIn;
+}
+async function onSignedIn0(u) {
+  setLoginStatus('Signing you in…');
+  // Make sure the account still exists on the server (a cached session survives the user being deleted in Supabase).
+  // Only a definite "no such user" answer signs you out; a flaky network must not.
   const { data: chk, error: chkErr } = await sb.auth.getUser();
-  if (chkErr || !chk || !chk.user) return forceSignOut('Your session is no longer valid — please sign in again.');
-  u = chk.user;
-  user = u; KEY = 'tvsm.cache.' + u.id;
+  if (chkErr && (chkErr.status === 401 || chkErr.status === 403 || /does not exist|not found|invalid claim/i.test(chkErr.message || ''))) return forceSignOut('Your session is no longer valid — please sign in again.');
+  if (chk && chk.user) u = chk.user; else if (chkErr) toast('Working offline: ' + chkErr.message);
+  if (!u || !u.id) return forceSignOut('Sign-in did not complete — please try again.');
+  user = u; KEY = 'tvsm.cache.' + u.id; loginStatus = '';
   state = loadLocal(KEY) || blank();
-  let { data: p } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
-  if (!p) p = await createProfile(u);
+  // Anything changed locally since the last successful sync (tab closed mid-save, lost network, a failed write) is kept and re-applied after the pull below
+  const localDelta = pendingDelta(u.id);
+  let { data: p, error: pErr } = await sb.from('profiles').select('*').eq('id', u.id).maybeSingle();
+  if (pErr) toast('Could not read your profile: ' + pErr.message);
+  else if (!p) p = await createProfile(u);
   profile = p || null;
-  try { await loadFromDb(); } catch (e) { toast('Could not load your data: ' + e.message); }
+  // Safety net: if the account comes back empty while this browser holds lists, the browser copy wins and is pushed up (never silently wiped)
+  const localCopy = Object.keys(state.shows).length + Object.keys(state.movies).length ? JSON.parse(JSON.stringify({ shows: state.shows, watched: state.watched, movies: state.movies, order: state.order })) : null;
+  if (localCopy) backupJson(u.id, JSON.stringify(state), 'before sign-in');
+  let loaded = false;
+  try { await loadFromDb(); loaded = true; } catch (e) { toast('Could not load your data: ' + e.message); }
+  if (loaded && localDelta) { applyDelta(localDelta); save(true); }
+  if (loaded && localCopy && !Object.keys(state.shows).length && !Object.keys(state.movies).length) { mergeImport(localCopy); save(true); toast(`Your account was empty — saving the ${Object.keys(localCopy.shows).length} shows and ${Object.keys(localCopy.movies).length} movies from this browser to it.`); }
   // one-time import of data saved by the old single-file version in this browser
   const legacy = loadLocal(LEGACY_KEY);
   if (legacy && Object.keys(legacy.shows).length + Object.keys(legacy.movies || {}).length && !Object.keys(state.shows).length && !Object.keys(state.movies).length) {
     if (confirm(`Import the ${Object.keys(legacy.shows).length} shows and ${Object.keys(legacy.movies || {}).length} movies saved in this browser into your account?`)) { mergeImport(legacy); save(); }
     localStorage.removeItem(LEGACY_KEY);
   }
-  navigated = true; render(); refreshAll(false);
+  navigated = true; render(); refreshAll(false); autoBackup();
 }
 // Normally the database trigger creates the profile at sign-up; this covers users who signed up before it existed.
 async function createProfile(u) {
@@ -1139,66 +1309,129 @@ async function createProfile(u) {
   return null;
 }
 async function loadFromDb() {
-  if (profile) { state.region = profile.region || state.region; state.lang = profile.lang || state.lang; state.dismissed = profile.dismissed || []; state.dismissedM = profile.dismissed_m || []; }
+  if (profile) { state.region = profile.region || state.region; state.lang = profile.lang || state.lang; state.dismissed = profile.dismissed || []; state.dismissedM = profile.dismissed_m || []; state.subs = profile.subscriptions || []; }
+  // Supabase caps every request at 1,000 rows, so read in pages (a few bulk-marked shows already exceed 1,000 episodes)
+  const all = async (table, cols, order) => { const out = []; for (let from = 0; ; from += 1000) { const r = await sb.from(table).select(cols).eq('user_id', user.id).order(order.k, { ascending: true }).order(order.k2 || order.k, { ascending: true }).order(order.k3 || order.k, { ascending: true }).range(from, from + 999); if (r.error) throw r.error; out.push(...r.data); if (r.data.length < 1000) break; } return { data: out }; };
   const [shows, watched, movies] = await Promise.all([
-    sb.from('user_shows').select('show_id,data,archived,added_at').eq('user_id', user.id).order('added_at'),
-    sb.from('watched_episodes').select('show_id,season,episode,watched_at').eq('user_id', user.id),
-    sb.from('user_movies').select('movie_id,data,list,watched_at,added_at').eq('user_id', user.id)]);
-  for (const r of [shows, watched, movies]) if (r.error) throw r.error;
+    all('user_shows', 'show_id,data,archived,added_at', { k: 'added_at', k2: 'show_id' }),
+    all('watched_episodes', 'show_id,season,episode,watched_at', { k: 'show_id', k2: 'season', k3: 'episode' }),
+    all('user_movies', 'movie_id,data,list,watched_at,added_at', { k: 'added_at', k2: 'movie_id' })]);
   state.shows = {}; state.order = []; state.watched = {}; state.movies = {};
   for (const r of shows.data) { const d = r.data; d.id = r.show_id; d.archived = r.archived; d.added = new Date(r.added_at).getTime(); state.shows[r.show_id] = d; state.order.push(r.show_id); state.watched[r.show_id] = {}; }
   for (const r of watched.data) { (state.watched[r.show_id] = state.watched[r.show_id] || {})[epKey(r.season, r.episode)] = new Date(r.watched_at).getTime(); }
   for (const r of movies.data) { const d = r.data; d.id = r.movie_id; d.list = r.list; d.watchedAt = r.watched_at ? new Date(r.watched_at).getTime() : null; d.added = new Date(r.added_at).getTime(); state.movies[r.movie_id] = d; }
-  synced = snapshot();
+  synced = snapshot(); try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(synced)); } catch (e) {}
+}
+// What the local copy holds that the last successful sync didn't: computed before pulling from the database, re-applied after.
+function pendingDelta(uid) {
+  let st = null; try { st = JSON.parse(localStorage.getItem('tvsm.synced.' + uid)); } catch (e) {}
+  if (!st || !st.shows || st.v !== 2) st = { shows: {}, watched: {}, movies: {}, prof: snapshot().prof };   // no usable snapshot: treat everything here as not yet saved (nothing is ever dropped)
+  const cur = snapshot(); const d = { shows: {}, delShows: [], watched: {}, delWatched: [], movies: {}, delMovies: [], prof: null };
+  for (const id in cur.shows) if (cur.shows[id] !== st.shows[id] && state.shows[id]) d.shows[id] = state.shows[id];
+  for (const id in st.shows) if (!(id in cur.shows)) d.delShows.push(+id);
+  for (const k in cur.watched) if (cur.watched[k] !== st.watched[k]) d.watched[k] = cur.watched[k];
+  for (const k in st.watched) if (!(k in cur.watched)) d.delWatched.push(k);
+  for (const id in cur.movies) if (cur.movies[id] !== st.movies[id] && state.movies[id]) d.movies[id] = state.movies[id];
+  for (const id in st.movies) if (!(id in cur.movies)) d.delMovies.push(+id);
+  if (cur.prof !== st.prof) d.prof = { region: state.region, lang: state.lang, dismissed: state.dismissed, dismissedM: state.dismissedM, subs: state.subs };
+  const empty = !Object.keys(d.shows).length && !d.delShows.length && !Object.keys(d.watched).length && !d.delWatched.length && !Object.keys(d.movies).length && !d.delMovies.length && !d.prof;
+  return empty ? null : d;
+}
+function applyDelta(d) {
+  for (const id in d.shows) { state.shows[id] = d.shows[id]; if (!state.order.includes(+id)) state.order.push(+id); state.watched[id] = state.watched[id] || {}; }
+  d.delShows.forEach(id => { delete state.shows[id]; delete state.watched[id]; state.order = state.order.filter(x => x !== id); });
+  for (const k in d.watched) { const [id, sn, ep] = k.split(/[:-]/).map(Number); if (!state.shows[id]) continue; (state.watched[id] = state.watched[id] || {})[epKey(sn, ep)] = d.watched[k]; }
+  d.delWatched.forEach(k => { const [id, sn, ep] = k.split(/[:-]/).map(Number); if (state.watched[id]) delete state.watched[id][epKey(sn, ep)]; });
+  for (const id in d.movies) state.movies[id] = d.movies[id];
+  d.delMovies.forEach(id => delete state.movies[id]);
+  if (d.prof) Object.assign(state, { region: d.prof.region, lang: d.prof.lang, dismissed: d.prof.dismissed, dismissedM: d.prof.dismissedM, subs: d.prof.subs });
 }
 // Sync = diff the current state against the last synced snapshot and write only what changed.
 let synced = null, syncTimer = null, syncing = false, syncAgain = false;
+// short fingerprint of a record (the last-synced snapshot used to keep whole copies, which doubled the storage footprint)
+function hash(str) { let h1 = 0x811c9dc5, h2 = 0x1b873593; for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = Math.imul(h2 + c, 2654435761) ^ (h2 >>> 13); } return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36) + str.length.toString(36); }
 const strip = (o, keys) => { const c = { ...o }; keys.forEach(k => delete c[k]); return c; };
 function snapshot() {
-  const shows = {}; for (const id in state.shows) shows[id] = JSON.stringify(strip(state.shows[id], ['archived', 'added', 'fetched'])) + '|' + (state.shows[id].archived ? 1 : 0);
+  const shows = {}; for (const id in state.shows) shows[id] = hash(JSON.stringify(strip(state.shows[id], ['archived', 'added', 'fetched']))) + '|' + (state.shows[id].archived ? 1 : 0);
   const watched = {}; for (const id in state.watched) for (const k in state.watched[id]) watched[id + ':' + k] = state.watched[id][k];
-  const movies = {}; for (const id in state.movies) movies[id] = JSON.stringify(strip(state.movies[id], ['list', 'watchedAt', 'added', 'fetched'])) + '|' + state.movies[id].list + '|' + (state.movies[id].watchedAt || '');
-  const prof = JSON.stringify([state.region, state.lang, state.dismissed, state.dismissedM]);
-  return { shows, watched, movies, prof };
+  const movies = {}; for (const id in state.movies) movies[id] = hash(JSON.stringify(strip(state.movies[id], ['list', 'watchedAt', 'added', 'fetched']))) + '|' + state.movies[id].list + '|' + (state.movies[id].watchedAt || '');
+  const prof = JSON.stringify([state.region, state.lang, state.dismissed, state.dismissedM, state.subs]);
+  return { v: 2, shows, watched, movies, prof };
 }
 function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(runSync, 500); }
 async function runSync() {
   if (!user || !sb) return;
   if (syncing) { syncAgain = true; return; }
-  syncing = true; setSyncState('Saving…');
+  syncing = true; syncTimer = null; setSyncState('Saving…');
+  // Each table is synced independently: a failure in one (e.g. a big show record) must never block the others (e.g. your ticks).
+  const now = snapshot(); const old = synced || { shows: {}, watched: {}, movies: {}, prof: '' };
+  const next = { v: 2, shows: { ...old.shows }, watched: { ...old.watched }, movies: { ...old.movies }, prof: old.prof };
+  const errors = []; let chShows = [], chW = [], delW = [], chM = [];
+  const run = async (label, fn, commit) => { try { const r = await fn(); if (r && r.error) throw r.error; commit(); } catch (e) { errors.push(label + ': ' + (e.message || e)); console.error('sync ' + label, e); } };
   try {
-    const now = snapshot(); const old = synced || { shows: {}, watched: {}, movies: {}, prof: '' };
-    const ops = [];
-    const upShows = Object.keys(now.shows).filter(id => now.shows[id] !== old.shows[id]).map(id => ({ user_id: user.id, show_id: +id, data: strip(state.shows[id], ['archived', 'added']), archived: !!state.shows[id].archived, added_at: new Date(state.shows[id].added || Date.now()).toISOString() }));
+    // shows — one request per changed show so a single oversized record can't sink the batch
+    chShows = Object.keys(now.shows).filter(id => now.shows[id] !== old.shows[id]);
+    for (const id of chShows) await run('show ' + (state.shows[id] && state.shows[id].name || id), () => sb.from('user_shows').upsert({ user_id: user.id, show_id: +id, data: strip(state.shows[id], ['archived', 'added']), archived: !!state.shows[id].archived, added_at: new Date(state.shows[id].added || Date.now()).toISOString() }), () => { next.shows[id] = now.shows[id]; });
     const delShows = Object.keys(old.shows).filter(id => !(id in now.shows)).map(Number);
-    if (upShows.length) ops.push(sb.from('user_shows').upsert(upShows));
-    if (delShows.length) ops.push(sb.from('user_shows').delete().eq('user_id', user.id).in('show_id', delShows));
-    const upW = Object.keys(now.watched).filter(k => now.watched[k] !== old.watched[k]).map(k => { const [id, s, e] = k.split(/[:-]/).map(Number); return { user_id: user.id, show_id: id, season: s, episode: e, watched_at: new Date(now.watched[k]).toISOString() }; });
-    const delW = Object.keys(old.watched).filter(k => !(k in now.watched)).map(k => k.split(/[:-]/).map(Number));
-    if (upW.length) ops.push(sb.from('watched_episodes').upsert(upW));
-    for (const [id, s, e] of delW) ops.push(sb.from('watched_episodes').delete().match({ user_id: user.id, show_id: id, season: s, episode: e }));
-    const upM = Object.keys(now.movies).filter(id => now.movies[id] !== old.movies[id]).map(id => ({ user_id: user.id, movie_id: +id, data: strip(state.movies[id], ['list', 'watchedAt', 'added']), list: state.movies[id].list, watched_at: state.movies[id].watchedAt ? new Date(state.movies[id].watchedAt).toISOString() : null, added_at: new Date(state.movies[id].added || Date.now()).toISOString() }));
+    if (delShows.length) await run('remove shows', () => sb.from('user_shows').delete().eq('user_id', user.id).in('show_id', delShows), () => delShows.forEach(id => delete next.shows[id]));
+    // watched episodes
+    chW = Object.keys(now.watched).filter(k => now.watched[k] !== old.watched[k]);
+    if (chW.length) await run('episodes', () => sb.from('watched_episodes').upsert(chW.map(k => { const [id, sn, ep] = k.split(/[:-]/).map(Number); return { user_id: user.id, show_id: id, season: sn, episode: ep, watched_at: new Date(now.watched[k]).toISOString() }; })), () => chW.forEach(k => next.watched[k] = now.watched[k]));
+    delW = Object.keys(old.watched).filter(k => !(k in now.watched));
+    for (const k of delW) { const [id, sn, ep] = k.split(/[:-]/).map(Number); await run('untick', () => sb.from('watched_episodes').delete().match({ user_id: user.id, show_id: id, season: sn, episode: ep }), () => delete next.watched[k]); }
+    // movies
+    chM = Object.keys(now.movies).filter(id => now.movies[id] !== old.movies[id]);
+    for (const id of chM) await run('movie ' + (state.movies[id] && state.movies[id].name || id), () => sb.from('user_movies').upsert({ user_id: user.id, movie_id: +id, data: strip(state.movies[id], ['list', 'watchedAt', 'added']), list: state.movies[id].list, watched_at: state.movies[id].watchedAt ? new Date(state.movies[id].watchedAt).toISOString() : null, added_at: new Date(state.movies[id].added || Date.now()).toISOString() }), () => { next.movies[id] = now.movies[id]; });
     const delM = Object.keys(old.movies).filter(id => !(id in now.movies)).map(Number);
-    if (upM.length) ops.push(sb.from('user_movies').upsert(upM));
-    if (delM.length) ops.push(sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM));
-    if (now.prof !== old.prof) ops.push(sb.from('profiles').update({ region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM }).eq('id', user.id));
-    const results = await Promise.all(ops);
-    const err = results.find(r => r && r.error);
-    if (err) throw err.error;
-    synced = now; setSyncState('');
-  } catch (e) { setSyncState('⚠ Not saved: ' + (e.message || e)); console.error('sync', e); setTimeout(scheduleSync, 15000); }
-  finally { syncing = false; if (syncAgain) { syncAgain = false; scheduleSync(); } }
+    if (delM.length) await run('remove movies', () => sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM), () => delM.forEach(id => delete next.movies[id]));
+    // profile (settings, dismissed suggestions, subscriptions)
+    if (now.prof !== old.prof) {
+      const patch = { region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM, subscriptions: state.subs || [] };
+      let r = await sb.from('profiles').update(patch).eq('id', user.id);
+      if (r.error && /subscriptions/.test(r.error.message)) { delete patch.subscriptions; r = await sb.from('profiles').update(patch).eq('id', user.id); if (!r.error) toast('Subscriptions need the latest schema.sql run in Supabase'); }
+      await run('settings', async () => r, () => { next.prof = now.prof; });
+    }
+  } finally {
+    synced = next; try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(next)); } catch (e) {}
+    const did = [chShows.length && chShows.length + ' show(s)', chW.length && chW.length + ' tick(s)', delW.length && delW.length + ' untick(s)', chM.length && chM.length + ' movie(s)'].filter(Boolean).join(', ');
+    if (errors.length) { syncLog('✗ ' + errors.join(' · ')); setSyncState('⚠ Not saved (' + errors[0] + ')'); showSyncBanner('Could not save to your account: ' + errors[0] + ' — retrying automatically.'); setTimeout(scheduleSync, 15000); }
+    else { if (did) syncLog('✓ saved ' + did); setSyncState(''); showSyncBanner(''); if (chW.length) verifyWatched(); }
+    syncing = false; if (syncAgain) { syncAgain = false; scheduleSync(); }
+  }
+}
+// Sync diary (last 30 events, kept in this browser) + a banner that stays until the problem is gone
+function syncLog(msg) { try { const k = 'tvsm.synclog'; const l = JSON.parse(localStorage.getItem(k) || '[]'); l.unshift(new Date().toLocaleString() + ' — ' + msg); localStorage.setItem(k, JSON.stringify(l.slice(0, 30))); } catch (e) {} const el = $('#syncLog'); if (el) el.innerHTML = syncLogHTML(); }
+function syncLogHTML() { try { const l = JSON.parse(localStorage.getItem('tvsm.synclog') || '[]'); return l.length ? l.map(x => `<div>${esc(x)}</div>`).join('') : 'Nothing saved yet.'; } catch (e) { return ''; } }
+function showSyncBanner(msg) { let b = $('#syncBanner'); if (!msg) { if (b) b.remove(); return; } if (!b) { b = document.createElement('div'); b.id = 'syncBanner'; b.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:50;background:var(--warn,#c33);color:#fff;padding:10px 16px;font-size:14px;text-align:center'; document.body.appendChild(b); } b.textContent = msg; }
+// After ticks are saved, read the count back: if the account holds fewer ticks than this browser, push everything again.
+async function verifyWatched() {
+  try { const r = await sb.from('watched_episodes').select('*', { count: 'exact', head: true }).eq('user_id', user.id); if (r.error) throw r.error;
+    const local = Object.values(state.watched).reduce((n, v) => n + Object.keys(v || {}).length, 0);
+    if (r.count == null) return;   // count not available; nothing to conclude
+    if (r.count < local) { verifyWatched.tries = (verifyWatched.tries || 0) + 1; if (verifyWatched.tries > 2) { showSyncBanner(`Your account holds ${r.count} ticked episodes but this browser ${local} — saving keeps failing; check the sync diary in Settings.`); return; } syncLog(`⚠ account has ${r.count} ticks, this browser ${local} — re-sending`); if (synced) synced.watched = {}; scheduleSync(); }
+    else verifyWatched.tries = 0;
+  } catch (e) { syncLog('✗ verify: ' + (e.message || e)); }
 }
 function setSyncState(t) { const el = $('#syncState'); if (el) el.textContent = t ? t + ' · ' : ''; }
-window.addEventListener('beforeunload', () => { if (syncTimer) runSync(); });
+window.addEventListener('beforeunload', () => { if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; runSync(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && syncTimer) { clearTimeout(syncTimer); syncTimer = null; runSync(); } });
 
 /* ============ boot ============ */
 if (sb) {
   const routeHash = () => { const h = location.hash.match(/^#u\/([a-z0-9_]+)/i); if (h) { view = { name: 'member', arg: h[1].toLowerCase() }; history.replaceState(null, '', '/'); if (user) { navigated = true; render(); } } };
   routeHash(); window.addEventListener('hashchange', routeHash);
+  // Supabase sends sign-in failures back in the URL (#error=…&error_description=…), e.g. an expired or already-used e-mail link. Show them instead of a silent login page.
+  const authErr = (() => { const q = new URLSearchParams(location.hash.replace(/^#/, '')), s = new URLSearchParams(location.search); const d = q.get('error_description') || s.get('error_description'), c = q.get('error_code') || s.get('error_code') || q.get('error') || s.get('error'); return d || c ? { code: c || '', desc: (d || c).replace(/\+/g, ' ') } : null; })();
+  if (authErr) {
+    const hint = /otp_expired|expired|invalid/i.test(authErr.code + ' ' + authErr.desc) ? ' The link only works once and for a short time — request a new one and open it in this same browser (some mail apps open it in a preview first).' : /database|saving new user/i.test(authErr.desc) ? ' The database refused the new account — run supabase/schema.sql again in the Supabase SQL editor.' : '';
+    loginStatus = 'Sign-in failed: ' + authErr.desc + '.' + hint; history.replaceState(null, '', '/');
+  } else if (/access_token=|(\?|&)code=/.test(location.hash + location.search)) loginStatus = 'Signing you in…';
   render();
-  sb.auth.getSession().then(({ data }) => { if (data.session) onSignedIn(data.session.user); });
-  sb.auth.onAuthStateChange((ev, session) => { if (ev === 'SIGNED_IN' && session && !user) onSignedIn(session.user); if (ev === 'SIGNED_OUT') { user = null; render(); } });
+  sb.auth.getSession().then(({ data, error }) => { if (data && data.session) onSignedIn(data.session.user); else if (error) setLoginStatus('Sign-in failed: ' + error.message); else if (!authErr && loginStatus) setLoginStatus('Sign-in failed: the link did not contain a valid session. Please request a new one.'); }, e => setLoginStatus('Sign-in failed: ' + (e.message || e)));
+  sb.auth.onAuthStateChange((ev, session) => {
+    if (ev === 'SIGNED_IN' && session) onSignedIn(session.user);
+    if (ev === 'SIGNED_OUT') { user = null; profile = null; state = blank(); render(); }
+  });
 } else { // no backend configured: single-user mode with a personal TMDB key, data in this browser only
   user = { id: 'local' }; state = loadLocal(LEGACY_KEY) || blank(); render(); if (state.apiKey) refreshAll(false);
 }
