@@ -1061,7 +1061,7 @@ function bindCommon() {
   document.querySelectorAll('#app .detail-head [data-add], #app .detail-head [data-mwant], #app .detail-head [data-mseen], #app .actions [data-add]').forEach(b => b.onclick = () => {
     if (b.dataset.add) addShow(+b.dataset.add); else if (b.dataset.mwant) addMovie(+b.dataset.mwant, 'want'); else addMovie(+b.dataset.mseen, 'seen'); });
   document.querySelectorAll('[data-mlist]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, l] = b.dataset.mlist.split('|'); setMovieList(+id, l); });
-  document.querySelectorAll('[data-mremove]').forEach(b => b.onclick = e => { e.stopPropagation(); const id = +b.dataset.mremove; if (!confirm(`Remove ${state.movies[id].name}?`)) return; delete state.movies[id]; save(); if (view.name === 'movie') go('movies'); else render(); });
+  document.querySelectorAll('[data-mremove]').forEach(b => b.onclick = e => { e.stopPropagation(); const id = +b.dataset.mremove; if (!confirm(`Remove ${state.movies[id].name}?`)) return; delete state.movies[id]; queueDel('movies', id); save(); if (view.name === 'movie') go('movies'); else render(); });
   bindFriendButtons();
   document.querySelectorAll('[data-mtab]').forEach(b => b.onclick = () => { moviesTab = b.dataset.mtab; render(); });
   document.querySelectorAll('[data-stab]').forEach(b => b.onclick = () => { showsTab = b.dataset.stab; render(); });
@@ -1072,7 +1072,7 @@ function bindCommon() {
   if (view.name === 'show' && s) {
     $('#refresh').onclick = async () => { await refreshShow(s.id); render(); };
     $('#archive').onclick = () => { s.archived = !s.archived; save(); render(); };
-    $('#remove').onclick = () => { if (!confirm(`Remove ${s.name} and its watch history?`)) return; delete state.shows[s.id]; delete state.watched[s.id]; state.order = state.order.filter(x => x !== s.id); save(); go('shows'); };
+    $('#remove').onclick = () => { if (!confirm(`Remove ${s.name} and its watch history?`)) return; delete state.shows[s.id]; delete state.watched[s.id]; queueDel('shows', s.id); state.order = state.order.filter(x => x !== s.id); save(); go('shows'); };
   }
   if ($('#ics')) $('#ics').onclick = exportICS;
   if (view.name === 'settings') {
@@ -1100,12 +1100,12 @@ function bindCommon() {
     $('#backupNow').onclick = async () => { await backupNow('manual'); toast('Backup saved'); listBackups(); };
     listBackups(); checkAccount();
     $('#file').onchange = ev => { const f = ev.target.files[0]; if (!f) return; const r = new FileReader(); r.onload = () => { try { const d = JSON.parse(r.result); if (!d.shows) throw 0; mergeImport(d); save(); toast('Imported — syncing to your account'); go('home'); } catch (e) { toast('Not a valid backup file'); } }; r.readAsText(f); };
-    $('#wipe').onclick = () => { if (confirm('Delete all your shows, movies and progress from your account?')) { const keep = { apiKey: state.apiKey, omdbKey: state.omdbKey, lang: state.lang, region: state.region }; state = Object.assign(blank(), keep); save(); render(); } };
+    $('#wipe').onclick = () => { if (confirm('Delete all your shows, movies and progress from your account?')) { const keep = { apiKey: state.apiKey, omdbKey: state.omdbKey, lang: state.lang, region: state.region }; state = Object.assign(blank(), keep); queueDel('all'); save(); render(); } };
   }
 }
 function setWatched(id, s, e, on, skipSave) {
   state.watched[id] = state.watched[id] || {};
-  if (on) state.watched[id][epKey(s, e)] = Date.now(); else delete state.watched[id][epKey(s, e)];
+  if (on) state.watched[id][epKey(s, e)] = Date.now(); else { delete state.watched[id][epKey(s, e)]; queueDel('watched', id + ':' + epKey(s, e)); }
   if (!skipSave) save();
 }
 function download(name, text, type) {
@@ -1316,10 +1316,12 @@ async function loadFromDb() {
     all('user_shows', 'show_id,data,archived,added_at', { k: 'added_at', k2: 'show_id' }),
     all('watched_episodes', 'show_id,season,episode,watched_at', { k: 'show_id', k2: 'season', k3: 'episode' }),
     all('user_movies', 'movie_id,data,list,watched_at,added_at', { k: 'added_at', k2: 'movie_id' })]);
-  state.shows = {}; state.order = []; state.watched = {}; state.movies = {};
-  for (const r of shows.data) { const d = r.data; d.id = r.show_id; d.archived = r.archived; d.added = new Date(r.added_at).getTime(); state.shows[r.show_id] = d; state.order.push(r.show_id); state.watched[r.show_id] = {}; }
-  for (const r of watched.data) { (state.watched[r.show_id] = state.watched[r.show_id] || {})[epKey(r.season, r.episode)] = new Date(r.watched_at).getTime(); }
-  for (const r of movies.data) { const d = r.data; d.id = r.movie_id; d.list = r.list; d.watchedAt = r.watched_at ? new Date(r.watched_at).getTime() : null; d.added = new Date(r.added_at).getTime(); state.movies[r.movie_id] = d; }
+  // build first, assign last: a failure half-way must never leave the app with an emptied state
+  const S = {}, O = [], W = {}, M = {};
+  for (const r of shows.data) { const d = r.data; d.id = r.show_id; d.archived = r.archived; d.added = new Date(r.added_at).getTime(); S[r.show_id] = d; O.push(r.show_id); W[r.show_id] = {}; }
+  for (const r of watched.data) { (W[r.show_id] = W[r.show_id] || {})[epKey(r.season, r.episode)] = new Date(r.watched_at).getTime(); }
+  for (const r of movies.data) { const d = r.data; d.id = r.movie_id; d.list = r.list; d.watchedAt = r.watched_at ? new Date(r.watched_at).getTime() : null; d.added = new Date(r.added_at).getTime(); M[r.movie_id] = d; }
+  state.shows = S; state.order = O; state.watched = W; state.movies = M;
   synced = snapshot(); try { localStorage.setItem('tvsm.synced.' + user.id, JSON.stringify(synced)); } catch (e) {}
 }
 // What the local copy holds that the last successful sync didn't: computed before pulling from the database, re-applied after.
@@ -1328,12 +1330,13 @@ function pendingDelta(uid) {
   if (!st || !st.shows || st.v !== 2) st = { shows: {}, watched: {}, movies: {}, prof: snapshot().prof };   // no usable snapshot: treat everything here as not yet saved (nothing is ever dropped)
   const cur = snapshot(); const d = { shows: {}, delShows: [], watched: {}, delWatched: [], movies: {}, delMovies: [], prof: null };
   for (const id in cur.shows) if (cur.shows[id] !== st.shows[id] && state.shows[id]) d.shows[id] = state.shows[id];
-  for (const id in st.shows) if (!(id in cur.shows)) d.delShows.push(+id);
+
   for (const k in cur.watched) if (cur.watched[k] !== st.watched[k]) d.watched[k] = cur.watched[k];
-  for (const k in st.watched) if (!(k in cur.watched)) d.delWatched.push(k);
+
   for (const id in cur.movies) if (cur.movies[id] !== st.movies[id] && state.movies[id]) d.movies[id] = state.movies[id];
-  for (const id in st.movies) if (!(id in cur.movies)) d.delMovies.push(+id);
+
   if (cur.prof !== st.prof) d.prof = { region: state.region, lang: state.lang, dismissed: state.dismissed, dismissedM: state.dismissedM, subs: state.subs };
+  const q = delQueue(); d.delShows = q.shows.slice(); d.delWatched = q.watched.slice(); d.delMovies = q.movies.slice();   // deletions made here that the account hasn't received yet
   const empty = !Object.keys(d.shows).length && !d.delShows.length && !Object.keys(d.watched).length && !d.delWatched.length && !Object.keys(d.movies).length && !d.delMovies.length && !d.prof;
   return empty ? null : d;
 }
@@ -1348,6 +1351,12 @@ function applyDelta(d) {
 }
 // Sync = diff the current state against the last synced snapshot and write only what changed.
 let synced = null, syncTimer = null, syncing = false, syncAgain = false;
+// Deletions reach the account ONLY through this queue, filled by explicit user actions (remove, untick, wipe).
+// A difference between the local copy and the last snapshot is never turned into a delete — that path once wiped an account.
+const delKey = () => 'tvsm.del.' + (user ? user.id : 'local');
+function delQueue() { try { return Object.assign({ shows: [], movies: [], watched: [], all: false }, JSON.parse(localStorage.getItem(delKey()) || '{}')); } catch (e) { return { shows: [], movies: [], watched: [], all: false }; } }
+function saveDelQueue(q) { try { if (!q.shows.length && !q.movies.length && !q.watched.length && !q.all) localStorage.removeItem(delKey()); else localStorage.setItem(delKey(), JSON.stringify(q)); } catch (e) {} }
+function queueDel(kind, key) { const q = delQueue(); if (kind === 'all') q.all = true; else if (!q[kind].includes(key)) q[kind].push(key); saveDelQueue(q); }
 // short fingerprint of a record (the last-synced snapshot used to keep whole copies, which doubled the storage footprint)
 function hash(str) { let h1 = 0x811c9dc5, h2 = 0x1b873593; for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = Math.imul(h2 + c, 2654435761) ^ (h2 >>> 13); } return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36) + str.length.toString(36); }
 const strip = (o, keys) => { const c = { ...o }; keys.forEach(k => delete c[k]); return c; };
@@ -1372,18 +1381,23 @@ async function runSync() {
     // shows — one request per changed show so a single oversized record can't sink the batch
     chShows = Object.keys(now.shows).filter(id => now.shows[id] !== old.shows[id]);
     for (const id of chShows) await run('show ' + (state.shows[id] && state.shows[id].name || id), () => sb.from('user_shows').upsert({ user_id: user.id, show_id: +id, data: strip(state.shows[id], ['archived', 'added']), archived: !!state.shows[id].archived, added_at: new Date(state.shows[id].added || Date.now()).toISOString() }), () => { next.shows[id] = now.shows[id]; });
-    const delShows = Object.keys(old.shows).filter(id => !(id in now.shows)).map(Number);
-    if (delShows.length) await run('remove shows', () => sb.from('user_shows').delete().eq('user_id', user.id).in('show_id', delShows), () => delShows.forEach(id => delete next.shows[id]));
+    const dq = delQueue();
+    if (dq.all) { await run('delete everything', async () => { for (const t of ['watched_episodes', 'user_shows', 'user_movies']) { const r = await sb.from(t).delete().eq('user_id', user.id); if (r.error) return r; } return {}; }, () => { dq.all = false; dq.shows = []; dq.movies = []; dq.watched = []; next.shows = {}; next.watched = {}; next.movies = {}; saveDelQueue(dq); }); }
+    const delShows = dq.shows.filter(id => !state.shows[id]);
+    if (delShows.length) await run('remove shows', async () => { const r = await sb.from('user_shows').delete().eq('user_id', user.id).in('show_id', delShows); if (r.error) return r; return sb.from('watched_episodes').delete().eq('user_id', user.id).in('show_id', delShows); }, () => { delShows.forEach(id => { delete next.shows[id]; Object.keys(next.watched).filter(k => k.startsWith(id + ':')).forEach(k => delete next.watched[k]); }); dq.shows = dq.shows.filter(id => !delShows.includes(id)); saveDelQueue(dq); });
+    dq.shows = dq.shows.filter(id => !state.shows[id]); saveDelQueue(dq);   // re-added since: no longer a deletion
     // watched episodes
     chW = Object.keys(now.watched).filter(k => now.watched[k] !== old.watched[k]);
     if (chW.length) await run('episodes', () => sb.from('watched_episodes').upsert(chW.map(k => { const [id, sn, ep] = k.split(/[:-]/).map(Number); return { user_id: user.id, show_id: id, season: sn, episode: ep, watched_at: new Date(now.watched[k]).toISOString() }; })), () => chW.forEach(k => next.watched[k] = now.watched[k]));
-    delW = Object.keys(old.watched).filter(k => !(k in now.watched));
-    for (const k of delW) { const [id, sn, ep] = k.split(/[:-]/).map(Number); await run('untick', () => sb.from('watched_episodes').delete().match({ user_id: user.id, show_id: id, season: sn, episode: ep }), () => delete next.watched[k]); }
+    delW = dq.watched.filter(k => !(k in now.watched));
+    for (const k of delW) { const [id, sn, ep] = k.split(/[:-]/).map(Number); await run('untick', () => sb.from('watched_episodes').delete().match({ user_id: user.id, show_id: id, season: sn, episode: ep }), () => { delete next.watched[k]; dq.watched = dq.watched.filter(x => x !== k); saveDelQueue(dq); }); }
+    dq.watched = dq.watched.filter(k => !(k in now.watched)); saveDelQueue(dq);
     // movies
     chM = Object.keys(now.movies).filter(id => now.movies[id] !== old.movies[id]);
     for (const id of chM) await run('movie ' + (state.movies[id] && state.movies[id].name || id), () => sb.from('user_movies').upsert({ user_id: user.id, movie_id: +id, data: strip(state.movies[id], ['list', 'watchedAt', 'added']), list: state.movies[id].list, watched_at: state.movies[id].watchedAt ? new Date(state.movies[id].watchedAt).toISOString() : null, added_at: new Date(state.movies[id].added || Date.now()).toISOString() }), () => { next.movies[id] = now.movies[id]; });
-    const delM = Object.keys(old.movies).filter(id => !(id in now.movies)).map(Number);
-    if (delM.length) await run('remove movies', () => sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM), () => delM.forEach(id => delete next.movies[id]));
+    const delM = dq.movies.filter(id => !state.movies[id]);
+    if (delM.length) await run('remove movies', () => sb.from('user_movies').delete().eq('user_id', user.id).in('movie_id', delM), () => { delM.forEach(id => delete next.movies[id]); dq.movies = dq.movies.filter(id => !delM.includes(id)); saveDelQueue(dq); });
+    dq.movies = dq.movies.filter(id => !state.movies[id]); saveDelQueue(dq);
     // profile (settings, dismissed suggestions, subscriptions)
     if (now.prof !== old.prof) {
       const patch = { region: state.region, lang: state.lang, dismissed: state.dismissed, dismissed_m: state.dismissedM, subscriptions: state.subs || [] };
