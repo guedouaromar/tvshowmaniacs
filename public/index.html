@@ -109,6 +109,9 @@
   .person img, .person .ph { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; background: var(--panel-2); margin: 0 auto 4px; display: block; }
   .person .pn { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .person .pc { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  details.sec { margin: 0; } details.sec > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+  details.sec > summary::-webkit-details-marker { display: none; } details.sec > summary::before { content: '▸'; color: var(--muted); font-size: 13px; transition: transform .15s; } details.sec[open] > summary::before { transform: rotate(90deg); }
+  details.sec > summary h2, details.sec > summary h3 { margin: 0; } details.sec > summary .cnt { color: var(--muted); font-weight: 400; font-size: 13px; }
   .stars { display:inline-flex; gap:2px; cursor:pointer; user-select:none; font-size:18px; line-height:1; }
   .stars span { color: var(--line); transition: color .1s; } .stars span.on, .stars:hover span.hover { color: #f5b301; } .stars span:hover { transform: scale(1.15); }
   .stars.sm { font-size:15px; }
@@ -670,10 +673,10 @@ function rateSectionHTML() {
   const rated = [...Object.values(state.shows).filter(s => s.rating).map(s => ({ ...s, kind: 'tv' })), ...Object.values(state.movies).filter(m => m.rating).map(m => ({ ...m, kind: 'movie' }))].sort((a, b) => b.rating - a.rating);
   const item = (x, kind) => `<div class="row"><img class="poster" src="${IMG}w92${x.poster}" alt=""><div class="grow"><div class="title"><a href="#" ${kind === 'tv' ? `data-show="${x.id}"` : `data-mopen="${x.id}"`} style="color:inherit;text-decoration:none">${esc(x.name)}</a> <span class="muted" style="font-weight:400">${x.year || ''}</span></div>${starsHTML(kind, x.id, x.rating, true)}</div></div>`;
   if (!shows.length && !movies.length && !rated.length) return '';
-  return `<div class="panel"><h2>Rate what you’ve watched</h2><p class="help">Your ratings sharpen the suggestions: what you love counts more, what you disliked is ignored.</p>
+  return `<p class="help">Your ratings sharpen the suggestions: what you love counts more, what you disliked is ignored.</p>
     ${shows.length ? `<h3 style="margin:10px 0 4px">Shows</h3>${shows.map(x => item(x, 'tv')).join('')}` : ''}
     ${movies.length ? `<h3 style="margin:10px 0 4px">Movies</h3>${movies.map(x => item(x, 'movie')).join('')}` : ''}
-    ${rated.length ? `<h3 style="margin:14px 0 4px">Your ratings (${rated.length})</h3>${rated.slice(0, 30).map(x => item(x, x.kind)).join('')}` : ''}</div>`;
+    ${rated.length ? `<h3 style="margin:14px 0 4px">Your ratings (${rated.length})</h3>${rated.slice(0, 30).map(x => item(x, x.kind)).join('')}` : ''}`;
 }
 function suggestionsHTML() {
   const { fresh, classics } = suggestions(); const P = state.pools || {};
@@ -709,17 +712,20 @@ function homeHTML() {
 function addDays(n) { const d = new Date(TODAY + 'T12:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
 function calendarHTML() {
   const active = Object.values(state.shows).filter(s => !s.archived);
-  const items = active.flatMap(s => s.eps.filter(ep => ep.air && ep.air >= addDays(-7)).map(ep => ({ s, ep })));
+  const past = active.flatMap(s => s.eps.filter(ep => ep.air && ep.air >= addDays(-7) && ep.air < TODAY && !isWatched(s.id, ep.s, ep.e)).map(ep => ({ s, ep }))).sort((a, b) => b.ep.air.localeCompare(a.ep.air) || a.s.name.localeCompare(b.s.name));
+  const items = active.flatMap(s => s.eps.filter(ep => ep.air && ep.air >= TODAY).map(ep => ({ s, ep })));
   items.sort((a, b) => a.ep.air.localeCompare(b.ep.air) || a.s.name.localeCompare(b.s.name));
   const byDay = {}; items.forEach(x => (byDay[x.ep.air] = byDay[x.ep.air] || []).push(x));
   const tba = active.filter(s => (s.inProd || /Returning/i.test(s.status)) && !upcoming(s).length);
   const days = Object.keys(byDay).sort();
   return `<div class="panel"><div class="split" style="justify-content:space-between;align-items:center">
-    <h2 style="margin:0">Calendar · last 7 days and upcoming</h2>
+    <h2 style="margin:0">Calendar · upcoming</h2>
     <button class="small" id="ics">📅 Export calendar (.ics)</button></div>
+    ${past.length ? `<details class="sec" style="margin:8px 0 12px"><summary><h3 style="font-size:15px">Last 7 days · not seen yet</h3><span class="cnt">${past.length} episode${past.length > 1 ? 's' : ''}</span></summary>
+      ${past.map(({ s, ep }) => `<div class="row" style="padding:6px 0"><div class="grow"><a href="#" data-show="${s.id}" style="color:inherit;text-decoration:none"><b>${esc(s.name)}</b></a> <span class="muted">${code(ep.s, ep.e)} · ${fmtDate(ep.air, { weekday: 'short', day: 'numeric', month: 'short' })}</span></div><button class="small" data-watch="${s.id}|${ep.s}|${ep.e}">✓ Watched</button></div>`).join('')}</details>` : ''}
     ${days.length ? days.map(day => `<div class="date-head">${day === TODAY ? '<span class="badge today">Today</span>' : ''}${fmtDate(day, { weekday: 'long', day: 'numeric', month: 'long' })}<small>${day < TODAY ? relDay(day) : ''}</small></div>
       ${byDay[day].map(({ s, ep }) => showRow(s, ep, isWatched(s.id, ep.s, ep.e) ? '<span class="badge">Watched</span>' : (aired(ep) ? `<button class="small" data-watch="${s.id}|${ep.s}|${ep.e}">✓ Watched</button>` : (ep.at ? `<span class="badge">${localTime(ep.at)}</span>` : '')))).join('')}`).join('')
-      : '<div class="empty">Nothing scheduled.</div>'}
+      : '<div class="empty">Nothing scheduled yet.</div>'}
   </div>
   ${tba.length ? `<div class="panel"><h2>Returning, date unknown</h2>${tba.map(s => showRow(s, null, `<span class="badge">${esc(s.status)}</span>`)).join('')}</div>` : ''}`;
 }
@@ -953,7 +959,20 @@ function watchStats() {
   const movies = Object.values(state.movies).filter(m => m.list === 'seen'); let mmins = 0;
   for (const m of movies) { mmins += m.runtime || 110; (m.genres || '').split(', ').filter(Boolean).forEach(g => genreMins[g] = (genreMins[g] || 0) + (m.runtime || 110)); if (m.watchedAt) { const mk = monthKey(m.watchedAt); months[mk] = (months[mk] || 0) + 1; } }
   perShow.sort((a, b) => b.mins - a.mins);
-  return { eps, mins, perShow, movies: movies.length, mmins, genres: Object.entries(genreMins).sort((a, b) => b[1] - a[1]).slice(0, 8), months };
+  // TV Time-style extras: per-day activity (streaks, busiest weekday), this year, networks, longest binge day
+  const days = {}, weekday = [0, 0, 0, 0, 0, 0, 0], nets = {}; const year = String(new Date().getFullYear()); let yEps = 0, yMins = 0, yMovies = 0;
+  for (const s of Object.values(state.shows)) { const w = state.watched[s.id] || {}; const avg = avgRuntime(s); const net = s.network || (s.providers && s.providers.stream[0] && s.providers.stream[0].name) || '';
+    for (const ep of s.eps) { const ts = w[epKey(ep.s, ep.e)]; if (!ts) continue; const d = new Date(ts); const k = d.toISOString().slice(0, 10); days[k] = (days[k] || 0) + 1; weekday[d.getDay()]++; if (net) nets[net] = (nets[net] || 0) + (ep.runtime || avg); if (k.startsWith(year)) { yEps++; yMins += ep.runtime || avg; } } }
+  for (const m of movies) if (m.watchedAt && new Date(m.watchedAt).toISOString().startsWith(year)) { yMovies++; yMins += m.runtime || 110; }
+  const dayKeys = Object.keys(days).sort(); let cur = 0, best = 0, run = 0, prev = null;
+  for (const k of dayKeys) { run = prev && (new Date(k) - new Date(prev)) / 86400000 === 1 ? run + 1 : 1; best = Math.max(best, run); prev = k; }
+  const last = dayKeys[dayKeys.length - 1]; if (last && (new Date(TODAY) - new Date(last)) / 86400000 <= 1) cur = run;
+  const busiest = dayKeys.length ? dayKeys.reduce((a, b) => days[b] > days[a] ? b : a) : null;
+  const first = dayKeys[0]; const span = first ? Math.max(7, (new Date(TODAY) - new Date(first)) / 86400000) : 0;
+  const wd = weekday.indexOf(Math.max(...weekday));
+  return { eps, mins, perShow, movies: movies.length, mmins, genres: Object.entries(genreMins).sort((a, b) => b[1] - a[1]).slice(0, 8), months,
+    streak: cur, bestStreak: best, activeDays: dayKeys.length, busiest: busiest ? { day: busiest, n: days[busiest] } : null, perWeek: span ? Math.round(eps / span * 7 * 10) / 10 : 0, favDay: eps ? ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][wd] : '',
+    nets: Object.entries(nets).sort((a, b) => b[1] - a[1]).slice(0, 8), year: { eps: yEps, mins: yMins, movies: yMovies, label: year } };
 }
 const monthKey = ts => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); };
 const fmtDur = mins => { const d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), m = mins % 60; return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`; };
@@ -962,25 +981,37 @@ function spaceHTML() {
   const completed = shows.filter(s => { const p = progress(s); return p.total && p.watched === p.total && /Ended|Canceled/.test(s.status); }).length;
   const caught = shows.filter(s => !s.archived && !nextToWatch(s)).length;
   const now = new Date(); const mk = []; for (let i = 11; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); mk.push([monthKey(d), d.toLocaleDateString(undefined, { month: 'short' })]); }
-  const maxM = Math.max(1, ...mk.map(([k]) => st.months[k] || 0)); const maxG = st.genres.length ? st.genres[0][1] : 1;
+  const maxM = Math.max(1, ...mk.map(([k]) => st.months[k] || 0)); const maxG = st.genres.length ? st.genres[0][1] : 1; const maxN = st.nets.length ? st.nets[0][1] : 1;
   const nothing = !shows.length && !Object.keys(state.movies).length;
+  const sec = (key, title, count, body, open) => `<details class="sec panel" data-sec="${key}" ${(spaceOpen[key] === undefined ? open : spaceOpen[key]) ? 'open' : ''}><summary><h2>${title}</h2>${count ? `<span class="cnt">${count}</span>` : ''}</summary><div style="margin-top:10px">${body}</div></details>`;
+  const days = total / 1440;
   return `<div class="panel"><h2>My space</h2>
     ${nothing ? '<div class="empty">Add shows and movies to see your stats.</div>' : `<div class="stats">
-      <div class="stat"><div class="big">${fmtDur(total)}</div><div class="lbl">total time watching${st.mmins ? ` · ${fmtDur(st.mins)} series, ${fmtDur(st.mmins)} movies` : ''}</div></div>
-      <div class="stat"><div class="big">${st.eps.toLocaleString()}</div><div class="lbl">episodes watched</div></div>
+      <div class="stat"><div class="big">${fmtDur(total)}</div><div class="lbl">total time watching${st.mmins ? ` · ${fmtDur(st.mins)} series, ${fmtDur(st.mmins)} movies` : ''}${days >= 1 ? ` · ${days.toFixed(1)} full days` : ''}</div></div>
+      <div class="stat"><div class="big">${st.eps.toLocaleString()}</div><div class="lbl">episodes watched · ${st.perWeek} per week on average</div></div>
       <div class="stat"><div class="big">${shows.length}</div><div class="lbl">shows tracked · ${completed} completed · ${caught} caught up</div></div>
       <div class="stat"><div class="big">${st.movies}</div><div class="lbl">movies watched · ${Object.values(state.movies).filter(m => m.list === 'want').length} on watchlist</div></div>
     </div>`}
   </div>
-  ${rateSectionHTML()}
-  ${st.perShow.length ? `<div class="panel"><h2>Key shows · by time spent</h2><div class="grid six">${st.perShow.slice(0, st.perShow.length >= 12 ? 12 : 6).map(({ s, eps, mins }) => `<div class="card" data-show="${s.id}">
+  ${nothing ? '' : sec('year', `${st.year.label} so far`, '', `<div class="stats">
+      <div class="stat"><div class="big">${fmtDur(st.year.mins)}</div><div class="lbl">watched this year</div></div>
+      <div class="stat"><div class="big">${st.year.eps.toLocaleString()}</div><div class="lbl">episodes this year</div></div>
+      <div class="stat"><div class="big">${st.year.movies}</div><div class="lbl">movies this year</div></div>
+      <div class="stat"><div class="big">${st.streak}${st.streak ? ' 🔥' : ''}</div><div class="lbl">day streak · best ${st.bestStreak} · ${st.activeDays} active days</div></div>
+    </div>
+    <p class="help" style="margin:10px 0 0">${st.favDay ? `You watch most on <b>${st.favDay}s</b>.` : ''}${st.busiest ? ` Biggest binge: <b>${st.busiest.n} episodes</b> on ${fmtDate(st.busiest.day, { day: 'numeric', month: 'long', year: 'numeric' })}.` : ''}</p>`, true)}
+  ${rateSectionHTML() ? sec('rate', 'Rate what you’ve watched', '', rateSectionHTML(), true) : ''}
+  ${st.perShow.length ? sec('key', 'Key shows · by time spent', st.perShow.length + ' shows', `<div class="grid six">${st.perShow.slice(0, st.perShow.length >= 12 ? 12 : 6).map(({ s, eps, mins }) => `<div class="card" data-show="${s.id}">
       ${s.poster ? `<img src="${IMG}w342${s.poster}" alt="" loading="lazy">` : '<div style="aspect-ratio:2/3;background:var(--panel-2)"></div>'}
-      <div class="body"><div class="name">${esc(s.name)}</div><div class="sub">${fmtDur(mins)} · ${eps} ep</div><div class="bar"><i style="width:${Math.round(100 * mins / st.perShow[0].mins)}%"></i></div></div></div>`).join('')}</div></div>` : ''}
-  ${st.genres.length ? `<div class="panel"><h2>Favourite genres · by time</h2>${st.genres.map(([g, m]) => `<div class="hbar"><span>${esc(g)}</span><div class="trk"><i style="width:${Math.round(100 * m / maxG)}%"></i></div><span class="val">${fmtDur(m)}</span></div>`).join('')}</div>` : ''}
-  ${st.eps || st.movies ? `<div class="panel"><h2>Activity · episodes & movies per month</h2><div class="cols">${mk.map(([k, l]) => `<div class="c" title="${st.months[k] || 0}"><i style="height:${Math.round(80 * (st.months[k] || 0) / maxM)}%"></i>${l}</div>`).join('')}</div>
-    <p class="help" style="margin:8px 0 0">Based on when you ticked episodes in the app; bulk-marked seasons count on the day you marked them.</p></div>` : ''}
-  ${st.perShow.length ? `<div class="panel"><h2>All shows · watch time</h2>${st.perShow.map(({ s, eps, mins }) => `<div class="hbar"><a href="#" data-show="${s.id}" style="color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.name)}</a><div class="trk"><i style="width:${Math.round(100 * mins / st.perShow[0].mins)}%"></i></div><span class="val">${fmtDur(mins)}</span></div>`).join('')}</div>` : ''}`;
+      <div class="body"><div class="name">${esc(s.name)}</div><div class="sub">${fmtDur(mins)} · ${eps} ep</div><div class="bar"><i style="width:${Math.round(100 * mins / st.perShow[0].mins)}%"></i></div></div></div>`).join('')}</div>`, true) : ''}
+  ${st.genres.length ? sec('genres', 'Favourite genres · by time', '', st.genres.map(([g, m]) => `<div class="hbar"><span>${esc(g)}</span><div class="trk"><i style="width:${Math.round(100 * m / maxG)}%"></i></div><span class="val">${fmtDur(m)}</span></div>`).join(''), false) : ''}
+  ${st.nets.length ? sec('nets', 'Networks & platforms · by time', '', st.nets.map(([g, m]) => `<div class="hbar"><span>${esc(g)}</span><div class="trk"><i style="width:${Math.round(100 * m / maxN)}%"></i></div><span class="val">${fmtDur(m)}</span></div>`).join(''), false) : ''}
+  ${st.eps || st.movies ? sec('activity', 'Activity · episodes & movies per month', '', `<div class="cols">${mk.map(([k, l]) => `<div class="c" title="${st.months[k] || 0}"><i style="height:${Math.round(80 * (st.months[k] || 0) / maxM)}%"></i>${l}</div>`).join('')}</div>
+    <p class="help" style="margin:8px 0 0">Based on when you ticked episodes in the app; bulk-marked seasons count on the day you marked them.</p>`, false) : ''}
+  ${st.perShow.length ? sec('all', 'All shows · watch time', st.perShow.length + ' shows', st.perShow.map(({ s, eps, mins }) => `<div class="hbar"><a href="#" data-show="${s.id}" style="color:inherit;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.name)}</a><div class="trk"><i style="width:${Math.round(100 * mins / st.perShow[0].mins)}%"></i></div><span class="val">${fmtDur(mins)} · ${eps} ep</span></div>`).join(''), false) : ''}`;
 }
+// which My space sections are open (remembered in this browser)
+let spaceOpen = {}; try { spaceOpen = JSON.parse(localStorage.getItem('tvsm.spaceOpen') || '{}'); } catch (e) {}
 function settingsHTML() {
   const n = Object.keys(state.shows).length;
   return `<div class="panel"><h2>Account</h2>
@@ -1016,7 +1047,7 @@ function settingsHTML() {
     <div id="backups" class="help">Loading…</div>
     <div class="split" style="margin-top:8px"><button id="backupNow">Back up now</button></div>
     <h3 style="margin:14px 0 6px">Sync diary</h3>
-    <div id="syncLog" class="help" style="max-height:160px;overflow:auto">${syncLogHTML()}</div>
+    <div id="syncLog" class="help">${syncLogHTML()}</div>
   </div>
   <div class="panel"><h2>Calendar reminders</h2>
     <div class="help">The .ics file contains one event per upcoming episode (next 90 days): at the exact release/broadcast time in your timezone when it’s known (reminder at that moment), otherwise all-day with a reminder at 20:00. The platform is noted in the event. Import it into Google Calendar or Apple Calendar to get notifications. It’s a snapshot, so re-export when you add shows or every few weeks.</div>
@@ -1026,7 +1057,8 @@ function settingsHTML() {
 async function listBackups() {
   const el = $('#backups'); if (!el) return;
   try { const rows = (await idb.all()).filter(b => !user || user.id === 'local' || b.uid === user.id || b.reason === 'storage full').sort((a, b) => b.ts - a.ts);
-    el.innerHTML = rows.length ? rows.map(b => `<div class="split" style="align-items:center;margin:4px 0"><span>${new Date(b.ts).toLocaleString()} — ${b.shows} shows, ${b.movies} movies, ${b.ticks} episodes <span class="muted">(${esc(b.reason)})</span></span><button class="ghost" data-restore="${esc(b.key)}">Restore</button></div>`).join('') : 'No backups yet.';
+    const line = b => `<div class="split" style="align-items:center;margin:4px 0"><span>${new Date(b.ts).toLocaleString()} — ${b.shows} shows, ${b.movies} movies, ${b.ticks} episodes <span class="muted">(${esc(b.reason)})</span></span><button class="ghost" data-restore="${esc(b.key)}">Restore</button></div>`;
+    el.innerHTML = rows.length ? rows.slice(0, 3).map(line).join('') + (rows.length > 3 ? `<details class="sec" style="margin-top:4px"><summary><span class="cnt">${rows.length - 3} older backup${rows.length > 4 ? 's' : ''}</span></summary>${rows.slice(3).map(line).join('')}</details>` : '') : 'No backups yet.';
     el.querySelectorAll('[data-restore]').forEach(btn => btn.onclick = async () => { const b = rows.find(x => x.key === btn.dataset.restore); if (!b || !confirm(`Add the ${b.shows} shows and ${b.movies} movies from this backup to your lists?`)) return; mergeImport(JSON.parse(b.json)); save(true); toast('Restored — syncing to your account'); render(); });
   } catch (e) { el.textContent = 'Backups are not available in this browser (' + (e.message || e) + ').'; }
 }
@@ -1043,6 +1075,7 @@ async function checkAccount() {
 /* ============ bindings ============ */
 function bindCommon() {
   bindStars();
+  document.querySelectorAll('details[data-sec]').forEach(d => d.ontoggle = () => { spaceOpen[d.dataset.sec] = d.open; try { localStorage.setItem('tvsm.spaceOpen', JSON.stringify(spaceOpen)); } catch (e) {} });
   document.querySelectorAll('[data-show]').forEach(el => el.onclick = e => { e.preventDefault(); go('show', +el.dataset.show); });
   document.querySelectorAll('[data-watch]').forEach(b => b.onclick = e => { e.stopPropagation(); const [id, s, ep] = b.dataset.watch.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, true); render(); });
   document.querySelectorAll('[data-toggle-ep]').forEach(b => b.onclick = () => { const [id, s, ep] = b.dataset.toggleEp.split('|').map(Number); if (!ensureTracked(id)) return; setWatched(id, s, ep, !isWatched(id, s, ep)); render(); });
@@ -1415,7 +1448,7 @@ async function runSync() {
 }
 // Sync diary (last 30 events, kept in this browser) + a banner that stays until the problem is gone
 function syncLog(msg) { try { const k = 'tvsm.synclog'; const l = JSON.parse(localStorage.getItem(k) || '[]'); l.unshift(new Date().toLocaleString() + ' — ' + msg); localStorage.setItem(k, JSON.stringify(l.slice(0, 30))); } catch (e) {} const el = $('#syncLog'); if (el) el.innerHTML = syncLogHTML(); }
-function syncLogHTML() { try { const l = JSON.parse(localStorage.getItem('tvsm.synclog') || '[]'); return l.length ? l.map(x => `<div>${esc(x)}</div>`).join('') : 'Nothing saved yet.'; } catch (e) { return ''; } }
+function syncLogHTML() { try { const l = JSON.parse(localStorage.getItem('tvsm.synclog') || '[]'); const line = x => `<div>${esc(x)}</div>`; return l.length ? l.slice(0, 3).map(line).join('') + (l.length > 3 ? `<details class="sec" style="margin-top:4px"><summary><span class="cnt">${l.length - 3} earlier entries</span></summary>${l.slice(3).map(line).join('')}</details>` : '') : 'Nothing saved yet.'; } catch (e) { return ''; } }
 function showSyncBanner(msg) { let b = $('#syncBanner'); if (!msg) { if (b) b.remove(); return; } if (!b) { b = document.createElement('div'); b.id = 'syncBanner'; b.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:50;background:var(--warn,#c33);color:#fff;padding:10px 16px;font-size:14px;text-align:center'; document.body.appendChild(b); } b.textContent = msg; }
 // After ticks are saved, read the count back: if the account holds fewer ticks than this browser, push everything again.
 async function verifyWatched() {
